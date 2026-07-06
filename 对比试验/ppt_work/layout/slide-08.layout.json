@@ -1,0 +1,992 @@
+{
+  "schema": "openai.presentation.layout/v4",
+  "unit": "px",
+  "slide": {
+    "aid": "sl/tly0ww",
+    "id": "tly0ww",
+    "slide": 8,
+    "layoutId": "c108eb92-88d0-4a40-b718-72938377041a",
+    "layoutName": "Title Slide",
+    "layoutType": "title",
+    "masterLayoutId": "de91d0a2-80e3-49f5-ab91-161a10a375bb",
+    "masterLayoutName": "Master",
+    "backgroundColor": "#F6F8FB",
+    "frame": {
+      "left": 0,
+      "top": 0,
+      "width": 1280,
+      "height": 720
+    }
+  },
+  "theme": {
+    "colorSchemeName": "ChatGPT",
+    "colors": {
+      "accent1": "#156082",
+      "accent2": "#E97132",
+      "accent3": "#196B24",
+      "accent4": "#0F9ED5",
+      "accent5": "#A02B93",
+      "accent6": "#4EA72E",
+      "bg1": "#FFFFFF",
+      "bg2": "#000000",
+      "tx1": "#1F1F1F",
+      "tx2": "#FFFFFF",
+      "dk1": "#000000",
+      "lt1": "#FFFFFF",
+      "dk2": "#0E2841",
+      "lt2": "#E8E8E8",
+      "hlink": "#467886",
+      "folHlink": "#96607D"
+    },
+    "typefaces": [
+      "Microsoft YaHei"
+    ]
+  },
+  "inheritedLayers": [
+    {
+      "scope": "layout",
+      "id": "c108eb92-88d0-4a40-b718-72938377041a",
+      "name": "Title Slide",
+      "type": "title",
+      "parentLayoutId": "de91d0a2-80e3-49f5-ab91-161a10a375bb",
+      "elements": []
+    },
+    {
+      "scope": "master",
+      "id": "de91d0a2-80e3-49f5-ab91-161a10a375bb",
+      "name": "Master",
+      "type": "master",
+      "elements": []
+    }
+  ],
+  "elements": [
+    {
+      "order": 1,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/rmhk3q5o",
+      "id": "1",
+      "bbox": [
+        0,
+        0,
+        1280,
+        74
+      ],
+      "geometry": "rect",
+      "fillColor": "#102A43",
+      "lineWidth": 0
+    },
+    {
+      "order": 2,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/g7adsji5",
+      "id": "2",
+      "bbox": [
+        54,
+        16,
+        220,
+        18
+      ],
+      "geometry": "rect",
+      "text": "TDAS 对比试验",
+      "textPreview": "TDAS 对比试验",
+      "resolvedFontSize": 7.44,
+      "resolvedTextStyle": {
+        "anchor": 1,
+        "fontSize": 13,
+        "typeface": "Microsoft YaHei",
+        "color": "#B7C6D9",
+        "bold": true,
+        "alignment": "left",
+        "verticalAlignment": "top",
+        "autoFit": "shrinkText",
+        "autoFitScale": 0.57,
+        "insets": {
+          "top": 4,
+          "right": 6,
+          "bottom": 4,
+          "left": 6
+        }
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "TDAS 对比试验"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "TDAS 对比试验",
+          "lineSpacingPercent": 112000,
+          "resolvedTextStyle": {
+            "fontSize": 13,
+            "typeface": "Microsoft YaHei",
+            "color": "#B7C6D9",
+            "bold": true,
+            "alignment": "left",
+            "lineSpacing": 1.12
+          },
+          "runs": [
+            {
+              "index": 1,
+              "text": "TDAS 对比试验",
+              "fontSize": 13,
+              "typeface": "Microsoft YaHei",
+              "color": "#B7C6D9",
+              "bold": true,
+              "alignment": "left",
+              "lineSpacing": 1.12
+            }
+          ],
+          "marginLeft": 0
+        }
+      ],
+      "lineWidth": 0
+    },
+    {
+      "order": 3,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/9s36hcrm",
+      "id": "3",
+      "bbox": [
+        52,
+        34,
+        900,
+        34
+      ],
+      "geometry": "rect",
+      "text": "权衡关系：空间分辨率提升会牺牲高频信噪比",
+      "textPreview": "权衡关系：空间分辨率提升会牺牲高频信噪比",
+      "resolvedFontSize": 19.35,
+      "resolvedTextStyle": {
+        "anchor": 1,
+        "fontSize": 30,
+        "typeface": "Microsoft YaHei",
+        "color": "#FFFFFF",
+        "bold": true,
+        "alignment": "left",
+        "verticalAlignment": "top",
+        "autoFit": "shrinkText",
+        "autoFitScale": 0.64,
+        "insets": {
+          "top": 4,
+          "right": 6,
+          "bottom": 4,
+          "left": 6
+        }
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "权衡关系：空间分辨率提升会牺牲高频信噪比"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "权衡关系：空间分辨率提升会牺牲高频信噪比",
+          "lineSpacingPercent": 112000,
+          "resolvedTextStyle": {
+            "fontSize": 30,
+            "typeface": "Microsoft YaHei",
+            "color": "#FFFFFF",
+            "bold": true,
+            "alignment": "left",
+            "lineSpacing": 1.12
+          },
+          "runs": [
+            {
+              "index": 1,
+              "text": "权衡关系：空间分辨率提升会牺牲高频信噪比",
+              "fontSize": 30,
+              "typeface": "Microsoft YaHei",
+              "color": "#FFFFFF",
+              "bold": true,
+              "alignment": "left",
+              "lineSpacing": 1.12
+            }
+          ],
+          "marginLeft": 0
+        }
+      ],
+      "lineWidth": 0
+    },
+    {
+      "order": 4,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/yd0z6103",
+      "id": "4",
+      "bbox": [
+        1000,
+        30,
+        220,
+        24
+      ],
+      "geometry": "rect",
+      "text": "来源：对比试验.docx",
+      "textPreview": "来源：对比试验.docx",
+      "resolvedFontSize": 11.9,
+      "resolvedTextStyle": {
+        "anchor": 1,
+        "fontSize": 12,
+        "typeface": "Microsoft YaHei",
+        "color": "#D7E2EF",
+        "alignment": "right",
+        "verticalAlignment": "top",
+        "autoFit": "shrinkText",
+        "autoFitScale": 0.99,
+        "insets": {
+          "top": 4,
+          "right": 6,
+          "bottom": 4,
+          "left": 6
+        }
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "来源：对比试验.docx"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "来源：对比试验.docx",
+          "lineSpacingPercent": 112000,
+          "resolvedTextStyle": {
+            "fontSize": 12,
+            "typeface": "Microsoft YaHei",
+            "color": "#D7E2EF",
+            "alignment": "right",
+            "lineSpacing": 1.12
+          },
+          "runs": [
+            {
+              "index": 1,
+              "text": "来源：对比试验.docx",
+              "fontSize": 12,
+              "typeface": "Microsoft YaHei",
+              "color": "#D7E2EF",
+              "alignment": "right",
+              "lineSpacing": 1.12
+            }
+          ],
+          "marginLeft": 0
+        }
+      ],
+      "lineWidth": 0
+    },
+    {
+      "order": 5,
+      "kind": "image",
+      "scope": "slide",
+      "aid": "im/61032lsz",
+      "id": "5",
+      "bbox": [
+        70,
+        124,
+        545,
+        335
+      ],
+      "geometry": "roundRect",
+      "alt": "对比试验原始图片 6: image6.png",
+      "contentType": "image/png",
+      "imageFit": "contain",
+      "imageMask": {
+        "geometry": "roundRect",
+        "adjustmentList": [
+          {
+            "name": "adj",
+            "formula": "val 1791"
+          }
+        ]
+      },
+      "asset": {
+        "assetId": "808bceed-eada-4976-b524-c6d7862dcfa0",
+        "contentType": "image/png",
+        "byteLength": 392811
+      }
+    },
+    {
+      "order": 6,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/gfmlkjm1",
+      "id": "6",
+      "bbox": [
+        70,
+        124,
+        545,
+        335
+      ],
+      "geometry": "roundRect",
+      "lineColor": "#D6DDE8",
+      "lineWidth": 1
+    },
+    {
+      "order": 7,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/90je9cvi",
+      "id": "7",
+      "bbox": [
+        80,
+        134,
+        205,
+        26
+      ],
+      "geometry": "roundRect",
+      "fillColor": "rgba(17, 24, 39, 0.8)",
+      "lineWidth": 0
+    },
+    {
+      "order": 8,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/ylc7u54z",
+      "id": "8",
+      "bbox": [
+        88,
+        138,
+        190,
+        17
+      ],
+      "geometry": "rect",
+      "text": "自研设备：抬高阈值后",
+      "textPreview": "自研设备：抬高阈值后",
+      "resolvedFontSize": 6.7,
+      "resolvedTextStyle": {
+        "anchor": 1,
+        "fontSize": 12,
+        "typeface": "Microsoft YaHei",
+        "color": "#FFFFFF",
+        "bold": true,
+        "alignment": "left",
+        "verticalAlignment": "top",
+        "autoFit": "shrinkText",
+        "autoFitScale": 0.56,
+        "insets": {
+          "top": 4,
+          "right": 6,
+          "bottom": 4,
+          "left": 6
+        }
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "自研设备：抬高阈值后"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "自研设备：抬高阈值后",
+          "lineSpacingPercent": 112000,
+          "resolvedTextStyle": {
+            "fontSize": 12,
+            "typeface": "Microsoft YaHei",
+            "color": "#FFFFFF",
+            "bold": true,
+            "alignment": "left",
+            "lineSpacing": 1.12
+          },
+          "runs": [
+            {
+              "index": 1,
+              "text": "自研设备：抬高阈值后",
+              "fontSize": 12,
+              "typeface": "Microsoft YaHei",
+              "color": "#FFFFFF",
+              "bold": true,
+              "alignment": "left",
+              "lineSpacing": 1.12
+            }
+          ],
+          "marginLeft": 0
+        }
+      ],
+      "lineWidth": 0
+    },
+    {
+      "order": 9,
+      "kind": "image",
+      "scope": "slide",
+      "aid": "im/6tovahoz",
+      "id": "9",
+      "bbox": [
+        665,
+        124,
+        545,
+        335
+      ],
+      "geometry": "roundRect",
+      "alt": "对比试验原始图片 10: image10.png",
+      "contentType": "image/png",
+      "imageFit": "contain",
+      "imageMask": {
+        "geometry": "roundRect",
+        "adjustmentList": [
+          {
+            "name": "adj",
+            "formula": "val 1791"
+          }
+        ]
+      },
+      "asset": {
+        "assetId": "e2ba713e-347c-41a4-96d0-93b8758e8cfe",
+        "contentType": "image/png",
+        "byteLength": 204289
+      }
+    },
+    {
+      "order": 10,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/vahoza1g",
+      "id": "10",
+      "bbox": [
+        665,
+        124,
+        545,
+        335
+      ],
+      "geometry": "roundRect",
+      "lineColor": "#D6DDE8",
+      "lineWidth": 1
+    },
+    {
+      "order": 11,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/6tovahoz",
+      "id": "11",
+      "bbox": [
+        675,
+        134,
+        205,
+        26
+      ],
+      "geometry": "roundRect",
+      "fillColor": "rgba(17, 24, 39, 0.8)",
+      "lineWidth": 0
+    },
+    {
+      "order": 12,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/dg7adsji",
+      "id": "12",
+      "bbox": [
+        683,
+        138,
+        190,
+        17
+      ],
+      "geometry": "rect",
+      "text": "光谷互联：抬高阈值后",
+      "textPreview": "光谷互联：抬高阈值后",
+      "resolvedFontSize": 6.7,
+      "resolvedTextStyle": {
+        "anchor": 1,
+        "fontSize": 12,
+        "typeface": "Microsoft YaHei",
+        "color": "#FFFFFF",
+        "bold": true,
+        "alignment": "left",
+        "verticalAlignment": "top",
+        "autoFit": "shrinkText",
+        "autoFitScale": 0.56,
+        "insets": {
+          "top": 4,
+          "right": 6,
+          "bottom": 4,
+          "left": 6
+        }
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "光谷互联：抬高阈值后"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "光谷互联：抬高阈值后",
+          "lineSpacingPercent": 112000,
+          "resolvedTextStyle": {
+            "fontSize": 12,
+            "typeface": "Microsoft YaHei",
+            "color": "#FFFFFF",
+            "bold": true,
+            "alignment": "left",
+            "lineSpacing": 1.12
+          },
+          "runs": [
+            {
+              "index": 1,
+              "text": "光谷互联：抬高阈值后",
+              "fontSize": 12,
+              "typeface": "Microsoft YaHei",
+              "color": "#FFFFFF",
+              "bold": true,
+              "alignment": "left",
+              "lineSpacing": 1.12
+            }
+          ],
+          "marginLeft": 0
+        }
+      ],
+      "lineWidth": 0
+    },
+    {
+      "order": 13,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/ovahoza1",
+      "id": "13",
+      "bbox": [
+        525,
+        430,
+        160,
+        30
+      ],
+      "geometry": "roundRect",
+      "fillColor": "rgba(255, 255, 255, 0.90196)",
+      "lineColor": "#DC2626",
+      "lineWidth": 1
+    },
+    {
+      "order": 14,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/z25kb6xk",
+      "id": "14",
+      "bbox": [
+        533,
+        435,
+        144,
+        22
+      ],
+      "geometry": "rect",
+      "text": "颜色条区间：-42 ~ 57",
+      "textPreview": "颜色条区间：-42 ~ 57",
+      "resolvedFontSize": 10.42,
+      "resolvedTextStyle": {
+        "anchor": 1,
+        "fontSize": 12,
+        "typeface": "Microsoft YaHei",
+        "color": "#DC2626",
+        "bold": true,
+        "alignment": "center",
+        "verticalAlignment": "top",
+        "autoFit": "shrinkText",
+        "autoFitScale": 0.87,
+        "insets": {
+          "top": 4,
+          "right": 6,
+          "bottom": 4,
+          "left": 6
+        }
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "颜色条区间：-42 ~ 57"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "颜色条区间：-42 ~ 57",
+          "lineSpacingPercent": 112000,
+          "resolvedTextStyle": {
+            "fontSize": 12,
+            "typeface": "Microsoft YaHei",
+            "color": "#DC2626",
+            "bold": true,
+            "alignment": "center",
+            "lineSpacing": 1.12
+          },
+          "runs": [
+            {
+              "index": 1,
+              "text": "颜色条区间：-42 ~ 57",
+              "fontSize": 12,
+              "typeface": "Microsoft YaHei",
+              "color": "#DC2626",
+              "bold": true,
+              "alignment": "center",
+              "lineSpacing": 1.12
+            }
+          ],
+          "marginLeft": 0
+        }
+      ],
+      "lineWidth": 0
+    },
+    {
+      "order": 15,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/6hcrmhk3",
+      "id": "15",
+      "bbox": [
+        1095,
+        430,
+        160,
+        30
+      ],
+      "geometry": "roundRect",
+      "fillColor": "rgba(255, 255, 255, 0.90196)",
+      "lineColor": "#DC2626",
+      "lineWidth": 1
+    },
+    {
+      "order": 16,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/d8v6psfi",
+      "id": "16",
+      "bbox": [
+        1103,
+        435,
+        144,
+        22
+      ],
+      "geometry": "rect",
+      "text": "颜色条区间：-42 ~ 57",
+      "textPreview": "颜色条区间：-42 ~ 57",
+      "resolvedFontSize": 10.42,
+      "resolvedTextStyle": {
+        "anchor": 1,
+        "fontSize": 12,
+        "typeface": "Microsoft YaHei",
+        "color": "#DC2626",
+        "bold": true,
+        "alignment": "center",
+        "verticalAlignment": "top",
+        "autoFit": "shrinkText",
+        "autoFitScale": 0.87,
+        "insets": {
+          "top": 4,
+          "right": 6,
+          "bottom": 4,
+          "left": 6
+        }
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "颜色条区间：-42 ~ 57"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "颜色条区间：-42 ~ 57",
+          "lineSpacingPercent": 112000,
+          "resolvedTextStyle": {
+            "fontSize": 12,
+            "typeface": "Microsoft YaHei",
+            "color": "#DC2626",
+            "bold": true,
+            "alignment": "center",
+            "lineSpacing": 1.12
+          },
+          "runs": [
+            {
+              "index": 1,
+              "text": "颜色条区间：-42 ~ 57",
+              "fontSize": 12,
+              "typeface": "Microsoft YaHei",
+              "color": "#DC2626",
+              "bold": true,
+              "alignment": "center",
+              "lineSpacing": 1.12
+            }
+          ],
+          "marginLeft": 0
+        }
+      ],
+      "lineWidth": 0
+    },
+    {
+      "order": 17,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/onyd0z61",
+      "id": "17",
+      "bbox": [
+        118,
+        502,
+        1044,
+        94
+      ],
+      "geometry": "roundRect",
+      "fillColor": "#FFFFFF",
+      "lineColor": "#D6DDE8",
+      "lineWidth": 1
+    },
+    {
+      "order": 18,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/vy90je9c",
+      "id": "18",
+      "bbox": [
+        154,
+        520,
+        960,
+        44
+      ],
+      "geometry": "rect",
+      "text": "颜色条位于 -42 ~ 57 区间。文档判断：自研设备在 100 Hz 以上的高频信噪比优于光谷互联设备；光谷互联设置用于增加空间分辨率，因此降低了信噪比。",
+      "textPreview": "颜色条位于 -42 ~ 57 区间。文档判断：自研设备在 100 Hz 以上的高频信噪比优于光谷互联设备；光谷互联设置用于增加空间分辨率，因此降低了信噪比。",
+      "resolvedFontSize": 13.76,
+      "resolvedTextStyle": {
+        "anchor": 1,
+        "fontSize": 21,
+        "typeface": "Microsoft YaHei",
+        "color": "#14213D",
+        "bold": true,
+        "alignment": "left",
+        "verticalAlignment": "top",
+        "autoFit": "shrinkText",
+        "autoFitScale": 0.66,
+        "insets": {
+          "top": 4,
+          "right": 6,
+          "bottom": 4,
+          "left": 6
+        }
+      },
+      "textLayout": {
+        "lineCount": 2,
+        "lines": [
+          {
+            "index": 1,
+            "text": "颜色条位于 -42 ~ 57 区间。文档判断：自研设备在 100 Hz"
+          },
+          {
+            "index": 2,
+            "text": "以上的高频信噪比优于光谷互联设备；光谷互联设置用于增加空间分辨率，因此降低了信噪比。"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "颜色条位于 -42 ~ 57 区间。文档判断：自研设备在 100 Hz 以上的高频信噪比优于光谷互联设备；光谷互联设置用于增加空间分辨率，因此降低了信噪比。",
+          "lineSpacingPercent": 112000,
+          "resolvedTextStyle": {
+            "fontSize": 21,
+            "typeface": "Microsoft YaHei",
+            "color": "#14213D",
+            "bold": true,
+            "alignment": "left",
+            "lineSpacing": 1.12
+          },
+          "runs": [
+            {
+              "index": 1,
+              "text": "颜色条位于 -42 ~ 57 区间。文档判断：自研设备在 100 Hz 以上的高频信噪比优于光谷互联设备；光谷互联设置用于增加空间分辨率，因此降低了信噪比。",
+              "fontSize": 21,
+              "typeface": "Microsoft YaHei",
+              "color": "#14213D",
+              "bold": true,
+              "alignment": "left",
+              "lineSpacing": 1.12
+            }
+          ],
+          "marginLeft": 0
+        }
+      ],
+      "lineWidth": 0
+    },
+    {
+      "order": 19,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/6dcbulwv",
+      "id": "19",
+      "bbox": [
+        54,
+        676,
+        1172,
+        0
+      ],
+      "geometry": "line",
+      "lineColor": "#D6DDE8",
+      "lineWidth": 1
+    },
+    {
+      "order": 20,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/ahoza1gv",
+      "id": "20",
+      "bbox": [
+        54,
+        685,
+        360,
+        18
+      ],
+      "geometry": "rect",
+      "text": "100 Hz 低音量音乐响应分析",
+      "textPreview": "100 Hz 低音量音乐响应分析",
+      "resolvedFontSize": 7.44,
+      "resolvedTextStyle": {
+        "anchor": 1,
+        "fontSize": 11,
+        "typeface": "Microsoft YaHei",
+        "color": "#5B667A",
+        "alignment": "left",
+        "verticalAlignment": "top",
+        "autoFit": "shrinkText",
+        "autoFitScale": 0.68,
+        "insets": {
+          "top": 4,
+          "right": 6,
+          "bottom": 4,
+          "left": 6
+        }
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "100 Hz 低音量音乐响应分析"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "100 Hz 低音量音乐响应分析",
+          "lineSpacingPercent": 112000,
+          "resolvedTextStyle": {
+            "fontSize": 11,
+            "typeface": "Microsoft YaHei",
+            "color": "#5B667A",
+            "alignment": "left",
+            "lineSpacing": 1.12
+          },
+          "runs": [
+            {
+              "index": 1,
+              "text": "100 Hz 低音量音乐响应分析",
+              "fontSize": 11,
+              "typeface": "Microsoft YaHei",
+              "color": "#5B667A",
+              "alignment": "left",
+              "lineSpacing": 1.12
+            }
+          ],
+          "marginLeft": 0
+        }
+      ],
+      "lineWidth": 0
+    },
+    {
+      "order": 21,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/32lszqtc",
+      "id": "21",
+      "bbox": [
+        1180,
+        682,
+        46,
+        22
+      ],
+      "geometry": "rect",
+      "text": "08",
+      "textPreview": "08",
+      "resolvedFontSize": 10.42,
+      "resolvedTextStyle": {
+        "anchor": 1,
+        "fontSize": 13,
+        "typeface": "Microsoft YaHei",
+        "color": "#5B667A",
+        "bold": true,
+        "alignment": "right",
+        "verticalAlignment": "top",
+        "autoFit": "shrinkText",
+        "autoFitScale": 0.8,
+        "insets": {
+          "top": 4,
+          "right": 6,
+          "bottom": 4,
+          "left": 6
+        }
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "08"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "08",
+          "lineSpacingPercent": 112000,
+          "resolvedTextStyle": {
+            "fontSize": 13,
+            "typeface": "Microsoft YaHei",
+            "color": "#5B667A",
+            "bold": true,
+            "alignment": "right",
+            "lineSpacing": 1.12
+          },
+          "runs": [
+            {
+              "index": 1,
+              "text": "08",
+              "fontSize": 13,
+              "typeface": "Microsoft YaHei",
+              "color": "#5B667A",
+              "bold": true,
+              "alignment": "right",
+              "lineSpacing": 1.12
+            }
+          ],
+          "marginLeft": 0
+        }
+      ],
+      "lineWidth": 0
+    }
+  ],
+  "composeRuns": []
+}

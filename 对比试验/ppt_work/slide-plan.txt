@@ -1,0 +1,4 @@
+对比试验设备差距说明 PPT
+页数：10
+风格：中文技术评审，深色标题栏，浅色内容区。
+输出：D:\SummaryofWork\200DataTreating\203TDAS\TDAS_python\对比试验\对比试验_设备差距说明.pptx

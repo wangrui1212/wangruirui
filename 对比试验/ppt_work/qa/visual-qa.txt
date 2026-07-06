@@ -1,0 +1,18 @@
+Mechanical
+- PPTX exists and is non-empty: yes, 4,405,756 bytes
+- Expected slide count: 10
+- Every final slide rendered: yes
+- Contact sheet or montage reviewed: key updated slides reviewed
+- Source notes reviewed: yes
+
+Issue Ledger
+| Issue | Slide(s) | Severity | Fix path | Status |
+|---|---:|---|---|---|
+| Add AOM carrier / pulse width / gauge distance context | 2 | requested edit | update content and rerender | fixed |
+| Add quantitative 20-30 dB response conclusion | 3 | requested edit | update content and rerender | fixed |
+| Annotate 100 Hz and 1 kHz FFT positions / noise-floor shape | 5 | requested edit | add editable markers and labels | fixed |
+| Add colorbar range labels | 6, 8 | requested edit | add editable labels and explanatory text | fixed |
+
+Final Decision
+- Pass/fail: pass
+- QA ledger saved as: D:\SummaryofWork\200DataTreating\203TDAS\TDAS_python\对比试验\ppt_work\qa\visual-qa.txt
