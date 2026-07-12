@@ -130,6 +130,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--guard-band", type=float, default=1.0, help="SNR保护带宽，默认 1 Hz。")
     parser.add_argument("--snr-noise-mode", choices=["local", "global"], default="local", help="SNR底噪口径，默认 local。")
     parser.add_argument("--exclude-band-hz", type=float, default=5.0, help="全局底噪排除信号频率总宽，默认 5 Hz。")
+    parser.add_argument(
+        "--spectrum-mode",
+        choices=["fft", "psd"],
+        default="fft",
+        help="频谱显示模式：fft 为 FFT幅值谱(dB)，psd 为 PSD功率谱密度(dB re 1 rad^2/Hz)。默认 fft。",
+    )
     return parser.parse_args(argv)
 
 
@@ -151,7 +157,6 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"点位超出范围: 输入索引={point_index}, 点位数={header.point_count}")
 
     distance_m = header.position_start_m + point_index * header.point_interval_m
-    trace = matrix[point_index, :].copy()
 
     output = args.output or Path(f"point_analysis_point{args.point}.png")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -161,9 +166,10 @@ def main(argv: list[str] | None = None) -> int:
     pg.setConfigOption("foreground", "k")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     configure_chinese_font(app)
-    window = PointAnalysisWindow(trace, header, point_index, distance_m)
+    window = PointAnalysisWindow(matrix, header, point_index)
     window.snr_noise_mode = args.snr_noise_mode
     window.snr_exclude_band_hz = float(args.exclude_band_hz)
+    window.fft_mode_combo.setCurrentIndex(1 if args.spectrum_mode == "psd" else 0)
     if args.target_frequency is not None:
         window.snr_mode_combo.setCurrentIndex(1)
         window.snr_target_freq.setValue(float(args.target_frequency))

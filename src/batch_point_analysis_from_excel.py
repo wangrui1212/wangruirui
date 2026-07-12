@@ -445,11 +445,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    project_root = Path(__file__).resolve().parent
+    source_dir = Path(__file__).resolve().parent
+    project_root = source_dir.parent
     excel_path = args.excel if args.excel.is_absolute() else project_root / args.excel
     data_root = args.data_root
     output_dir = args.output_dir if args.output_dir.is_absolute() else project_root / args.output_dir
-    export_script = args.export_script if args.export_script.is_absolute() else project_root / args.export_script
+    export_script = args.export_script if args.export_script.is_absolute() else source_dir / args.export_script
     export_python = args.export_python or default_export_python(project_root)
     test_date = date.fromisoformat(args.date)
     sheets = tuple(args.sheets or DEFAULT_SHEETS)

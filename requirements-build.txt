@@ -1,4 +1,5 @@
 numpy
 pyqtgraph
 PyQt6
+PyOpenGL
 pyinstaller

@@ -214,13 +214,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    project_root = Path(__file__).resolve().parent
+    source_dir = Path(__file__).resolve().parent
+    project_root = source_dir.parent
     excel_path = args.excel if args.excel.is_absolute() else project_root / args.excel
     output_dir = args.output_dir if args.output_dir.is_absolute() else project_root / args.output_dir
     image_dir = output_dir / "images"
     summary_path = output_dir / "cable_point_snr_summary.csv"
     export_python = default_export_python(project_root)
-    export_script = project_root / "point_analysis_export.py"
+    export_script = source_dir / "point_analysis_export.py"
     test_date = date.fromisoformat(args.date)
 
     records = iter_records(excel_path)

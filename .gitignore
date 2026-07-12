@@ -1,4 +1,6 @@
 .codex_work/
+.spreadsheet_build_*/
+.venv-build/
 **/node_modules/
 dist/
 build/
@@ -18,3 +20,5 @@ env/
 *.tmp
 *.inspect.ndjson
 *.dat
+src/_vendor/
+井中流动分析/

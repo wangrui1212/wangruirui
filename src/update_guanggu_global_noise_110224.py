@@ -7,7 +7,7 @@ from pathlib import Path
 from batch_guanggu_40ns_point_analysis import DatFile, compute_snr, point_distance
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CSV_PATH = PROJECT_ROOT / "outputs" / "point_analysis_guanggu_40ns_global_noise" / "point_snr_summary.csv"
 DAT_PATH = Path(r"E:\新方案das数据分析\光谷互联数据\2026-06-15-11-02-24-out.dat")
 IMAGE_PATH = (

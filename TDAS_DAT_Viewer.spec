@@ -2,11 +2,11 @@
 
 
 a = Analysis(
-    ['D:\\SummaryofWork\\200DataTreating\\203TDAS\\TDAS_python\\tdas_dat_viewer.py'],
+    ['D:\\SummaryofWork\\200DataTreating\\203TDAS\\TDAS_python\\src\\tdas_dat_viewer.py'],
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=['pyqtgraph.opengl', 'OpenGL'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -17,11 +17,12 @@ from point_analysis_export import load_concatenated_matrix
 from tdas_dat_viewer import calculate_peak_line_snr
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+SOURCE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SOURCE_DIR.parent
 SUMMARY = PROJECT_ROOT / "outputs/cable_test/point_analysis/cable_point_snr_summary.csv"
 IMAGE_DIR = PROJECT_ROOT / "outputs/cable_test/point_analysis/images"
 DATA_ROOT = Path(r"E:\新方案das数据分析\DAS0624data-缆\20260624\15")
-EXPORT_SCRIPT = PROJECT_ROOT / "point_analysis_export.py"
+EXPORT_SCRIPT = SOURCE_DIR / "point_analysis_export.py"
 PYTHON = PROJECT_ROOT / ".venv-build/Scripts/python.exe"
 TARGETS = {
     "5": {"frequency": 100.0},

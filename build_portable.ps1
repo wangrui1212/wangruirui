@@ -8,7 +8,7 @@ $AppName = "TDAS_DAT_Viewer"
 $AppDistDir = Join-Path $DistDir $AppName
 $ZipPath = Join-Path $DistDir "$AppName`_portable.zip"
 $SpecPath = Join-Path $ProjectRoot "$AppName.spec"
-$SourcePath = Join-Path $ProjectRoot "tdas_dat_viewer.py"
+$SourcePath = Join-Path $ProjectRoot "src\tdas_dat_viewer.py"
 $RequirementsPath = Join-Path $ProjectRoot "requirements-build.txt"
 
 if (-not (Test-Path $SourcePath)) {
@@ -55,6 +55,8 @@ Write-Host "Building portable application..."
     --onedir `
     --windowed `
     --name $AppName `
+    --hidden-import pyqtgraph.opengl `
+    --hidden-import OpenGL `
     $SourcePath
 
 $ExePath = Join-Path $AppDistDir "$AppName.exe"
