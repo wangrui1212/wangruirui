@@ -1,12 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_all
+
+datas = []
+binaries = []
+hiddenimports = ['das_report', 'pyqtgraph.opengl', 'OpenGL']
+datas += collect_data_files('pyqtgraph')
+tmp_ret = collect_all('scipy')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
     ['D:\\SummaryofWork\\200DataTreating\\203TDAS\\TDAS_python\\src\\tdas_dat_viewer.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=['pyqtgraph.opengl', 'OpenGL'],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

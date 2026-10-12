@@ -17,10 +17,17 @@ from PyQt6 import QtWidgets
 
 from tdas_dat_viewer import (
     DatHeader,
+    FFT_WINDOW_OPTIONS,
+    PointAnalysisWindow,
     SpatialPsdComparisonWindow,
+    compute_one_sided_spectrum,
     compute_spatial_segment_psd,
+    gauge_length_from_header,
+    phase_to_microstrain_per_rad,
+    phase_to_picostrain_per_rad,
     psd_to_db,
 )
+from point_analysis_export import parse_args as parse_point_export_args
 
 
 def make_header(
@@ -31,6 +38,7 @@ def make_header(
     dx: float = 1.0,
     start: float = 0.0,
     protocol: str = "CDAS",
+    extra_info: dict[str, object] | None = None,
 ) -> DatHeader:
     return DatHeader(
         protocol=protocol,
@@ -52,6 +60,7 @@ def make_header(
         sample_count=samples,
         position_start_m=start,
         raw_value_note="synthetic",
+        extra_info={} if extra_info is None else extra_info,
     )
 
 
@@ -139,6 +148,113 @@ class SpatialPsdAlgorithmTests(unittest.TestCase):
         self.assertEqual(result.selected_channel_count, 3)
         self.assertEqual(result.valid_channel_count, 2)
         self.assertTrue(result.warnings)
+
+
+class OneSidedSpectrumTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def test_bin_aligned_sine_has_calibrated_peak_rms_and_power(self) -> None:
+        fs = 1024
+        sample_count = 1024
+        tone_hz = 128.0
+        amplitude = 2.0
+        time_s = np.arange(sample_count, dtype=np.float64) / fs
+        samples = amplitude * np.sin(2.0 * np.pi * tone_hz * time_s)
+
+        result = compute_one_sided_spectrum(samples, fs, "Rectangular")
+        index = int(np.argmax(result.magnitude_peak))
+        df = float(result.freqs_hz[1] - result.freqs_hz[0])
+
+        self.assertAlmostEqual(float(result.freqs_hz[index]), tone_hz, places=5)
+        self.assertAlmostEqual(float(result.magnitude_peak[index]), amplitude, places=5)
+        self.assertAlmostEqual(float(result.magnitude_rms[index]), amplitude / np.sqrt(2.0), places=5)
+        self.assertAlmostEqual(float(np.sum(result.power)), amplitude**2 / 2.0, places=5)
+        np.testing.assert_allclose(result.power, result.psd * df, rtol=1e-6, atol=1e-8)
+        np.testing.assert_allclose(np.square(result.asd), result.psd, rtol=1e-6, atol=1e-8)
+
+    def test_all_supported_windows_preserve_bin_centered_peak(self) -> None:
+        fs = 4096
+        sample_count = 4096
+        tone_hz = 256.0
+        amplitude = 1.5
+        time_s = np.arange(sample_count, dtype=np.float64) / fs
+        samples = amplitude * np.sin(2.0 * np.pi * tone_hz * time_s)
+
+        for window_name in FFT_WINDOW_OPTIONS:
+            with self.subTest(window=window_name):
+                result = compute_one_sided_spectrum(samples, fs, window_name)
+                peak = float(np.max(result.magnitude_peak))
+                self.assertAlmostEqual(peak, amplitude, delta=0.002)
+
+    def test_nyquist_is_not_doubled_and_dc_is_removed(self) -> None:
+        fs = 1024
+        sample_count = 1024
+        amplitude = 1.25
+        samples = amplitude * np.power(-1.0, np.arange(sample_count))
+        result = compute_one_sided_spectrum(samples, fs, "Rectangular")
+
+        self.assertAlmostEqual(float(result.magnitude_peak[-1]), amplitude, places=5)
+        self.assertAlmostEqual(float(result.magnitude_rms[-1]), amplitude, places=5)
+        constant = compute_one_sided_spectrum(np.full(sample_count, 7.0), fs, "Hann")
+        self.assertTrue(np.allclose(constant.magnitude_peak, 0.0))
+
+    def test_invalid_short_input_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "至少需要 2"):
+            compute_one_sided_spectrum(np.array([1.0]), 100.0)
+
+    def test_phase_to_microstrain_defaults_and_header_gauge(self) -> None:
+        self.assertAlmostEqual(phase_to_microstrain_per_rad(), 0.0106402044878, places=10)
+        self.assertAlmostEqual(phase_to_picostrain_per_rad(), 10640.2044878, places=7)
+        silixa_header = make_header(
+            protocol="Silixa TDMS",
+            extra_info={"GaugeLength": 12.5},
+        )
+        gauge_length, source = gauge_length_from_header(silixa_header)
+        self.assertEqual(gauge_length, 12.5)
+        self.assertIn("GaugeLength", source)
+        cdas_gauge, cdas_source = gauge_length_from_header(make_header(protocol="CDAS", dx=3.5))
+        self.assertEqual(cdas_gauge, 3.5)
+        self.assertIn("点位间隔", cdas_source)
+        fallback, fallback_source = gauge_length_from_header(make_header(protocol="synthetic"))
+        self.assertEqual(fallback, 10.0)
+        self.assertIn("默认", fallback_source)
+
+    def test_point_window_defaults_and_mode_switch_do_not_change_snr_basis(self) -> None:
+        fs = 1024
+        sample_count = 1024
+        time_s = np.arange(sample_count, dtype=np.float32) / fs
+        matrix = np.array([2.0 * np.sin(2.0 * np.pi * 128.0 * time_s)], dtype=np.float32)
+        header = make_header(fs=fs, points=1, samples=sample_count)
+        window = PointAnalysisWindow(matrix, header, 0)
+        try:
+            self.assertEqual(window.fft_mode_combo.currentData(), "magnitude-peak")
+            self.assertEqual(window.fft_window_combo.currentText(), "Hann")
+            peak_before = window.magnitude_peak.copy()
+            window.fft_mode_combo.setCurrentIndex(3)
+            self.assertTrue(np.array_equal(window.magnitude_peak, peak_before))
+            window.fft_window_combo.setCurrentText("Flat Top")
+            self.assertGreater(float(np.max(window.magnitude_peak)), 1.9)
+            window.signal_unit_combo.setCurrentIndex(window.signal_unit_combo.findData("picostrain"))
+            conversion = window.phase_to_display_factor()
+            self.assertEqual(window.signal_unit(), "picostrain")
+            self.assertAlmostEqual(float(np.max(window.trace)), 2.0 * conversion, delta=0.01)
+            self.assertGreater(float(np.max(window.magnitude_peak)), 1.9 * conversion)
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+    def test_point_export_accepts_new_modes_and_legacy_fft_alias(self) -> None:
+        args = parse_point_export_args([
+            "input.dat", "--point", "0", "--spectrum-mode", "asd", "--window", "flat-top", "--unit", "picostrain",
+        ])
+        self.assertEqual(args.spectrum_mode, "asd")
+        self.assertEqual(args.window, "flat-top")
+        self.assertEqual(args.unit, "picostrain")
+        legacy = parse_point_export_args(["input.dat", "--point", "0", "--spectrum-mode", "fft"])
+        self.assertEqual(legacy.spectrum_mode, "fft")
 
 
 class SpatialPsdWindowTests(unittest.TestCase):

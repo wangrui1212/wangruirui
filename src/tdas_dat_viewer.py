@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import struct
 import sys
+import gc
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,8 @@ if VENDOR_DIR.exists():
 import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
+from scipy import signal
+from scipy.ndimage import median_filter
 
 try:
     import pyqtgraph.opengl as gl
@@ -33,6 +36,25 @@ TDMS_TO_C_META_DATA = 0x02
 TDMS_TO_C_RAW_DATA = 0x08
 SILIXA_NORMALIZED_MAX = 3.14
 DISPLAY_MAX_TIME_BINS = 4096
+FFT_WINDOW_OPTIONS = (
+    "Rectangular",
+    "Hann",
+    "Hamming",
+    "Blackman",
+    "Blackman-Harris",
+    "Flat Top",
+)
+SPECTRUM_MODE_OPTIONS = (
+    ("Magnitude (Peak)", "magnitude-peak"),
+    ("Magnitude (RMS)", "magnitude-rms"),
+    ("Power spectrum", "power"),
+    ("Power Spectral Density (PSD)", "psd"),
+    ("Amplitude Spectral Density (ASD)", "asd"),
+)
+DEFAULT_WAVELENGTH_NM = 1550.0
+DEFAULT_REFRACTIVE_INDEX = 1.4862
+DEFAULT_PHOTOELASTIC_COEFFICIENT = 0.78
+DEFAULT_GAUGE_LENGTH_M = 10.0
 
 
 @dataclass(frozen=True)
@@ -82,9 +104,12 @@ class DatHeader:
 
     @property
     def distance_span_m(self) -> float:
-        if self.point_count <= 1:
+        if self.point_count <= 0:
             return 0.0
-        return (self.point_count - 1) * self.point_interval_m
+        # The heatmap contains one spatial cell for every channel.  Map each
+        # cell to one complete point interval, rather than squeezing N cells
+        # into only N - 1 intervals.
+        return self.point_count * self.point_interval_m
 
     @property
     def position_end_m(self) -> float:
@@ -129,6 +154,34 @@ class SpatialPsdCurveRecord:
     source_label: str
     short_label: str
     metadata: dict[str, object]
+
+
+@dataclass(frozen=True)
+class SpectralFlatteningSettings:
+    """Parameters for detecting and removing narrow-band interference."""
+
+    first_frequency_hz: float = 200.0
+    threshold_db: float = 8.0
+    q_factor: float = 50.0
+    median_size: int = 9
+
+
+@dataclass(frozen=True)
+class ChannelReplacement:
+    """One inclusive, zero-based source-to-target channel mapping."""
+
+    source_path: Path
+    target_start: int
+    target_end: int
+    source_start: int
+    source_end: int
+
+
+@dataclass
+class ProcessingResult:
+    matrix: np.ndarray
+    detected_frequencies_hz: dict[int, np.ndarray]
+    source_previews: dict[int, tuple[np.ndarray, DatHeader, np.ndarray]]
 
 
 def read_cdas_header(path: Path) -> DatHeader:
@@ -520,6 +573,401 @@ def read_signal_matrix(path: Path, header: DatHeader) -> np.ndarray:
     return data.reshape(header.point_count, header.sample_count).astype(np.float32) / 100.0
 
 
+def read_signal_matrix_slice_into(
+    path: Path,
+    header: DatHeader,
+    first_sample: int,
+    last_sample: int,
+    output: np.ndarray,
+    point_first: int = 0,
+    point_last: int | None = None,
+) -> None:
+    """Read only a time slice directly into a float32 ``(point, time)`` buffer.
+
+    Report generation commonly needs a few seconds from a large acquisition
+    file.  Reading the whole file and slicing it afterwards needlessly holds a
+    second, often multi-gigabyte matrix in RAM.  The source layout differs by
+    device: Silixa/Guanggu are time-major, while CDAS is point-major.  This
+    helper retains those layout details here and lets callers allocate exactly
+    one final output matrix.
+    """
+    first_sample = int(first_sample)
+    last_sample = int(last_sample)
+    point_first = int(point_first)
+    point_last = int(header.point_count) if point_last is None else int(point_last)
+    expected_shape = (point_last - point_first, max(0, last_sample - first_sample))
+    if first_sample < 0 or last_sample > header.sample_count or last_sample <= first_sample:
+        raise ValueError(f"{path.name} requested sample slice is out of range: {first_sample}:{last_sample}")
+    if point_first < 0 or point_last > header.point_count or point_last <= point_first:
+        raise ValueError(f"{path.name} requested point slice is out of range: {point_first}:{point_last}")
+    if output.dtype != np.float32 or output.shape != expected_shape:
+        raise ValueError(f"output shape/dtype must be {expected_shape} float32, got {output.shape} {output.dtype}")
+
+    points = int(header.point_count)
+    samples = last_sample - first_sample
+    if header.protocol == "Silixa TDMS":
+        if point_first != 0 or point_last != points:
+            raw = np.memmap(path, dtype="<i2", mode="r", offset=int(header.header_size), shape=(int(header.sample_count), points))
+            try:
+                np.copyto(output, raw[first_sample:last_sample, point_first:point_last].T, casting="unsafe")
+            finally:
+                del raw
+            return
+        offset = int(header.header_size) + first_sample * points * 2
+        raw = np.fromfile(path, dtype="<i2", offset=offset, count=samples * points)
+        if raw.size != samples * points:
+            raise ValueError(f"{path.name} data length does not match requested slice")
+        np.copyto(output, raw.reshape(samples, points).T, casting="unsafe")
+        return
+    if header.protocol == "光谷互联":
+        if point_first != 0 or point_last != points:
+            raw = np.memmap(path, dtype="<f4", mode="r", offset=int(header.header_size), shape=(int(header.sample_count), points))
+            try:
+                np.copyto(output, raw[first_sample:last_sample, point_first:point_last].T, casting="unsafe")
+            finally:
+                del raw
+            return
+        offset = int(header.header_size) + first_sample * points * 4
+        raw = np.fromfile(path, dtype="<f4", offset=offset, count=samples * points)
+        if raw.size != samples * points:
+            raise ValueError(f"{path.name} data length does not match requested slice")
+        np.copyto(output, raw.reshape(samples, points).T, casting="unsafe")
+        return
+
+    # CDAS stores the complete time trace for each point consecutively.  A
+    # memmap keeps that file-backed instead of materialising all points; the
+    # selected columns are converted straight into the caller's output buffer.
+    raw = np.memmap(
+        path,
+        dtype=">i2",
+        mode="r",
+        offset=int(header.header_size),
+        shape=(points, int(header.sample_count)),
+    )
+    try:
+        np.divide(raw[point_first:point_last, first_sample:last_sample], 100.0, out=output, casting="unsafe")
+    finally:
+        del raw
+
+
+def read_signal_matrix_indices_into(
+    path: Path,
+    header: DatHeader,
+    sample_indices: np.ndarray,
+    output: np.ndarray,
+) -> None:
+    """Read selected time samples directly into a ``(point, sample)`` buffer.
+
+    This is intentionally used by the report boundary-preview path only.  It
+    permits a multi-minute, high-rate file to be represented by uniformly
+    distributed samples without ever allocating the complete time matrix.
+    """
+    indices = np.asarray(sample_indices, dtype=np.int64).reshape(-1)
+    expected_shape = (int(header.point_count), int(indices.size))
+    if indices.size == 0 or np.any(indices < 0) or np.any(indices >= header.sample_count):
+        raise ValueError(f"{path.name} requested sample indices are out of range")
+    if output.dtype != np.float32 or output.shape != expected_shape:
+        raise ValueError(f"output shape/dtype must be {expected_shape} float32, got {output.shape} {output.dtype}")
+    points = int(header.point_count)
+    if header.protocol == "Silixa TDMS":
+        raw = np.memmap(path, dtype="<i2", mode="r", offset=int(header.header_size), shape=(int(header.sample_count), points))
+        try:
+            np.copyto(output, raw[indices].T, casting="unsafe")
+        finally:
+            del raw
+        return
+    if header.protocol == "光谷互联":
+        raw = np.memmap(path, dtype="<f4", mode="r", offset=int(header.header_size), shape=(int(header.sample_count), points))
+        try:
+            np.copyto(output, raw[indices].T, casting="unsafe")
+        finally:
+            del raw
+        return
+    raw = np.memmap(path, dtype=">i2", mode="r", offset=int(header.header_size), shape=(points, int(header.sample_count)))
+    try:
+        np.divide(raw[:, indices], 100.0, out=output, casting="unsafe")
+    finally:
+        del raw
+
+
+def _validate_flattening_settings(settings: SpectralFlatteningSettings, sample_rate_hz: int) -> None:
+    if sample_rate_hz <= 0:
+        raise ValueError("采样率必须大于 0")
+    if not 0.0 <= settings.first_frequency_hz < sample_rate_hz / 2.0:
+        raise ValueError("最低检测频率必须小于 Nyquist 频率")
+    if settings.threshold_db < 0.0:
+        raise ValueError("峰值阈值不能小于 0 dB")
+    if settings.q_factor <= 0.0:
+        raise ValueError("陷波器 Q 值必须大于 0")
+    if settings.median_size < 3 or settings.median_size % 2 == 0:
+        raise ValueError("中值窗口必须是不小于 3 的奇数")
+
+
+def detect_interference_frequencies(
+    trace: np.ndarray,
+    sample_rate_hz: int,
+    settings: SpectralFlatteningSettings = SpectralFlatteningSettings(),
+) -> np.ndarray:
+    """Return narrow-band peaks above a local median spectrum background.
+
+    The FFT here is diagnostic only.  The returned frequencies are subsequently
+    removed from the time-domain signal with zero-phase notch filters.
+    """
+    _validate_flattening_settings(settings, sample_rate_hz)
+    samples = np.asarray(trace, dtype=np.float64).reshape(-1)
+    if samples.size < max(16, settings.median_size) or not np.all(np.isfinite(samples)):
+        return np.array([], dtype=np.float64)
+    samples = samples - np.mean(samples)
+    # Windowing prevents a strong, bin-aligned component below the configured
+    # range from producing numerical/leakage side lobes that look like dozens
+    # of independent narrow-band interferers.
+    spectrum = np.fft.rfft(samples * np.hanning(samples.size))
+    freqs = np.fft.rfftfreq(samples.size, d=1.0 / sample_rate_hz)
+    magnitude_db = 20.0 * np.log10(np.maximum(np.abs(spectrum), 1e-15))
+    baseline_db = median_filter(magnitude_db, size=settings.median_size, mode="nearest")
+    excess_db = magnitude_db - baseline_db
+    peaks, properties = signal.find_peaks(excess_db, height=settings.threshold_db)
+    if peaks.size == 0:
+        return np.array([], dtype=np.float64)
+    valid = (
+        (freqs[peaks] >= settings.first_frequency_hz)
+        & (freqs[peaks] > 0.0)
+        & (freqs[peaks] < sample_rate_hz / 2.0)
+        & np.isfinite(properties["peak_heights"])
+    )
+    return freqs[peaks[valid]].astype(np.float64, copy=False)
+
+
+def flatten_spectral_trace(
+    trace: np.ndarray,
+    sample_rate_hz: int,
+    settings: SpectralFlatteningSettings = SpectralFlatteningSettings(),
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply detected zero-phase notch filters and return data plus peak list."""
+    values = np.asarray(trace, dtype=np.float32).reshape(-1)
+    peaks = detect_interference_frequencies(values, sample_rate_hz, settings)
+    return apply_notch_frequencies(values, sample_rate_hz, peaks, settings.q_factor), peaks
+
+
+def apply_notch_frequencies(
+    trace: np.ndarray,
+    sample_rate_hz: int,
+    frequencies_hz: np.ndarray,
+    q_factor: float,
+) -> np.ndarray:
+    """Apply an already-designed common notch list to one time trace."""
+    values = np.asarray(trace, dtype=np.float32).reshape(-1)
+    peaks = np.asarray(frequencies_hz, dtype=np.float64).reshape(-1)
+    if peaks.size == 0:
+        return values.copy()
+    if values.size <= 12:
+        return values.copy()
+
+    mean_value = float(np.mean(values))
+    filtered = values.astype(np.float64, copy=True) - mean_value
+    for frequency_hz in peaks:
+        try:
+            b, a = signal.iirnotch(float(frequency_hz), q_factor, fs=sample_rate_hz)
+            filtered = signal.sosfiltfilt(signal.tf2sos(b, a), filtered)
+        except ValueError:
+            # Frequencies too close to Nyquist can be rejected by scipy; they
+            # are intentionally skipped instead of making the entire job fail.
+            continue
+    return (filtered + mean_value).astype(np.float32)
+
+
+def flatten_spectral_channels(
+    matrix: np.ndarray,
+    sample_rate_hz: int,
+    first_channel: int,
+    last_channel: int,
+    settings: SpectralFlatteningSettings = SpectralFlatteningSettings(),
+    reference_channel: int | None = None,
+) -> tuple[np.ndarray, dict[int, np.ndarray]]:
+    """Filter an inclusive zero-based channel interval without changing others."""
+    source = np.asarray(matrix, dtype=np.float32)
+    if source.ndim != 2:
+        raise ValueError("相位数据必须是 通道 x 时间 的二维矩阵")
+    if first_channel < 0 or last_channel < first_channel or last_channel >= source.shape[0]:
+        raise ValueError("滤波通道范围无效")
+    if reference_channel is not None and not 0 <= reference_channel < source.shape[0]:
+        raise ValueError("参考通道范围无效")
+    result = source.copy()
+    detected: dict[int, np.ndarray] = {}
+    common_peaks: np.ndarray | None = None
+    if reference_channel is not None:
+        common_peaks = detect_interference_frequencies(source[reference_channel], sample_rate_hz, settings)
+    for channel_index in range(first_channel, last_channel + 1):
+        if common_peaks is None:
+            result[channel_index], detected[channel_index] = flatten_spectral_trace(source[channel_index], sample_rate_hz, settings)
+        else:
+            result[channel_index] = apply_notch_frequencies(source[channel_index], sample_rate_hz, common_peaks, settings.q_factor)
+            detected[channel_index] = common_peaks.copy()
+    return result, detected
+
+
+def validate_replacement_headers(target: DatHeader, source: DatHeader) -> None:
+    if source.protocol != target.protocol:
+        raise ValueError(f"来源协议必须与目标相同: {source.protocol} != {target.protocol}")
+    target_duration = target.sample_count / max(1, target.frequency_hz)
+    source_duration = source.sample_count / max(1, source.frequency_hz)
+    tolerance = max(1e-9, 1e-9 * max(target_duration, source_duration))
+    if abs(target_duration - source_duration) > tolerance:
+        raise ValueError(
+            f"来源与目标时长必须一致: 目标 {target_duration:.9g} s, 来源 {source_duration:.9g} s"
+        )
+
+
+def resample_matrix_to_target(
+    source_matrix: np.ndarray,
+    source_header: DatHeader,
+    target_header: DatHeader,
+) -> np.ndarray:
+    """Band-limited, polyphase resample onto the exact target time grid."""
+    validate_replacement_headers(target_header, source_header)
+    source = np.asarray(source_matrix, dtype=np.float32)
+    if source.ndim != 2 or source.shape[1] != source_header.sample_count:
+        raise ValueError("来源数据形状与文件头不一致")
+    if source_header.frequency_hz == target_header.frequency_hz:
+        result = source.copy()
+    else:
+        divisor = int(np.gcd(int(source_header.frequency_hz), int(target_header.frequency_hz)))
+        up = int(target_header.frequency_hz) // divisor
+        down = int(source_header.frequency_hz) // divisor
+        result = signal.resample_poly(source, up, down, axis=1, padtype="line").astype(np.float32)
+    if result.shape[1] != target_header.sample_count:
+        raise ValueError(
+            f"重采样后样本数不匹配: {result.shape[1]} != {target_header.sample_count}；"
+            "请确认两个文件的时长与采样率"
+        )
+    return result
+
+
+def resample_matrix_to_rate(
+    source_matrix: np.ndarray,
+    source_rate_hz: int,
+    target_rate_hz: int,
+) -> np.ndarray:
+    """Band-limited resampling without imposing a target duration."""
+    source = np.asarray(source_matrix, dtype=np.float32)
+    if source.ndim != 2 or source_rate_hz <= 0 or target_rate_hz <= 0:
+        raise ValueError("重采样数据或采样率无效")
+    if source_rate_hz == target_rate_hz:
+        return source.copy()
+    divisor = int(np.gcd(int(source_rate_hz), int(target_rate_hz)))
+    return signal.resample_poly(
+        source,
+        int(target_rate_hz) // divisor,
+        int(source_rate_hz) // divisor,
+        axis=1,
+        padtype="line",
+    ).astype(np.float32)
+
+
+def apply_channel_replacements(
+    target_matrix: np.ndarray,
+    target_header: DatHeader,
+    filter_start: int,
+    filter_end: int,
+    settings: SpectralFlatteningSettings,
+    replacements: list[ChannelReplacement],
+    source_data: dict[Path, tuple[np.ndarray, DatHeader]],
+) -> ProcessingResult:
+    """Filter target/source segments, resample sources, then replace channels."""
+    result, detected = flatten_spectral_channels(
+        target_matrix, target_header.frequency_hz, filter_start, filter_end, settings
+    )
+    previews: dict[int, tuple[np.ndarray, DatHeader, np.ndarray]] = {}
+    for index, mapping in enumerate(replacements):
+        if mapping.source_path not in source_data:
+            raise ValueError(f"未加载来源文件: {mapping.source_path.name}")
+        source_matrix, source_header = source_data[mapping.source_path]
+        validate_replacement_headers(target_header, source_header)
+        if (
+            mapping.target_start < 0
+            or mapping.target_end < mapping.target_start
+            or mapping.target_end >= target_header.point_count
+            or mapping.source_start < 0
+            or mapping.source_end < mapping.source_start
+            or mapping.source_end >= source_header.point_count
+        ):
+            raise ValueError(f"第 {index + 1} 条替换映射的通道范围无效")
+        target_count = mapping.target_end - mapping.target_start + 1
+        source_count = mapping.source_end - mapping.source_start + 1
+        if target_count != source_count:
+            raise ValueError(f"第 {index + 1} 条替换映射的目标与来源通道数必须相等")
+
+        source_block = source_matrix[mapping.source_start : mapping.source_end + 1]
+        filtered_block, _ = flatten_spectral_channels(
+            source_block,
+            source_header.frequency_hz,
+            0,
+            source_block.shape[0] - 1,
+            settings,
+        )
+        resampled_block = resample_matrix_to_target(
+            filtered_block, replace(source_header, point_count=filtered_block.shape[0]),
+            replace(target_header, point_count=filtered_block.shape[0]),
+        )
+        result[mapping.target_start : mapping.target_end + 1] = resampled_block
+        previews[index] = (filtered_block, source_header, resampled_block)
+    return ProcessingResult(result, detected, previews)
+
+
+def export_processed_signal(
+    target_path: Path,
+    target_header: DatHeader,
+    matrix: np.ndarray,
+    output_path: Path,
+) -> None:
+    """Write a processed matrix while preserving the target file protocol/header."""
+    values = np.asarray(matrix, dtype=np.float32)
+    expected_shape = (target_header.point_count, target_header.sample_count)
+    if values.shape != expected_shape:
+        raise ValueError(f"导出矩阵形状必须为 {expected_shape}，当前为 {values.shape}")
+    if output_path.resolve() == target_path.resolve():
+        raise ValueError("处理结果不能覆盖原始文件")
+    with target_path.open("rb") as source_file:
+        header_bytes = source_file.read(target_header.header_size)
+    if len(header_bytes) != target_header.header_size:
+        raise ValueError("无法读取目标文件头")
+
+    if target_header.protocol == "CDAS":
+        scaled = np.rint(values.astype(np.float64) * 100.0)
+        dtype = np.dtype(">i2")
+        payload = scaled
+    elif target_header.protocol == "光谷互联":
+        scaled = values
+        dtype = np.dtype("<f4")
+        payload = scaled.T
+    elif target_header.protocol == "Silixa TDMS":
+        scaled = np.rint(values.astype(np.float64))
+        dtype = np.dtype("<i2")
+        payload = scaled.T
+    else:
+        raise ValueError(f"不支持导出协议: {target_header.protocol}")
+    if np.issubdtype(dtype, np.integer):
+        limits = np.iinfo(dtype)
+        if np.nanmin(scaled) < limits.min or np.nanmax(scaled) > limits.max:
+            raise ValueError(f"处理结果超出 {dtype} 的可写范围 [{limits.min}, {limits.max}]")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("wb") as output_file:
+        output_file.write(header_bytes)
+        np.asarray(payload, dtype=dtype).tofile(output_file)
+
+    exported_header = read_header(output_path)
+    if (
+        exported_header.protocol != target_header.protocol
+        or exported_header.frequency_hz != target_header.frequency_hz
+        or exported_header.point_count != target_header.point_count
+        or exported_header.sample_count != target_header.sample_count
+    ):
+        raise ValueError("导出文件头校验失败")
+    exported_matrix = read_signal_matrix(output_path, exported_header)
+    if exported_matrix.shape != values.shape:
+        raise ValueError("导出数据形状校验失败")
+
+
 def normalize_silixa_matrix(matrix: np.ndarray) -> tuple[np.ndarray, float]:
     """Scale Silixa raw counts so max absolute value maps to 3.14."""
     if matrix.size == 0:
@@ -587,14 +1035,157 @@ def aggregate_positive_matrix_max(
 
 
 def make_stft_window(name: str, sample_count: int) -> np.ndarray:
-    key = name.strip().lower()
+    if sample_count < 1:
+        raise ValueError("窗函数长度必须至少为 1")
+    key = name.strip().lower().replace("_", "-")
     if key == "hamming":
         return np.hamming(sample_count).astype(np.float32)
     if key == "blackman":
         return np.blackman(sample_count).astype(np.float32)
+    if key in {"blackman-harris", "blackmanharris"}:
+        return signal.windows.blackmanharris(sample_count).astype(np.float32)
+    if key in {"flat top", "flat-top", "flattop"}:
+        return signal.windows.flattop(sample_count).astype(np.float32)
     if key == "rectangular":
         return np.ones(sample_count, dtype=np.float32)
     return np.hanning(sample_count).astype(np.float32)
+
+
+@dataclass(frozen=True)
+class OneSidedSpectrum:
+    """Calibrated one-sided spectra for a real-valued, windowed trace."""
+
+    freqs_hz: np.ndarray
+    magnitude_peak: np.ndarray
+    magnitude_rms: np.ndarray
+    power: np.ndarray
+    psd: np.ndarray
+    asd: np.ndarray
+    sample_count: int
+
+
+def phase_to_microstrain_per_rad(
+    wavelength_nm: float = DEFAULT_WAVELENGTH_NM,
+    refractive_index: float = DEFAULT_REFRACTIVE_INDEX,
+    photoelastic_coefficient: float = DEFAULT_PHOTOELASTIC_COEFFICIENT,
+    gauge_length_m: float = DEFAULT_GAUGE_LENGTH_M,
+) -> float:
+    """Return the DAS phase-to-strain factor in microstrain per radian.
+
+    ``ε = Δφ λ / (4π n ξ G)``; this helper expresses ε in με.  With the
+    defaults it returns 0.010640204 με/rad (10640.204 pε/rad).
+    """
+    values = (wavelength_nm, refractive_index, photoelastic_coefficient, gauge_length_m)
+    if not all(np.isfinite(value) and value > 0.0 for value in values):
+        raise ValueError("波长、折射率、光弹性系数和标距必须大于 0")
+    return float(wavelength_nm) * 1e-3 / (
+        4.0 * np.pi * float(refractive_index) * float(photoelastic_coefficient) * float(gauge_length_m)
+    )
+
+
+def phase_to_picostrain_per_rad(
+    wavelength_nm: float = DEFAULT_WAVELENGTH_NM,
+    refractive_index: float = DEFAULT_REFRACTIVE_INDEX,
+    photoelastic_coefficient: float = DEFAULT_PHOTOELASTIC_COEFFICIENT,
+    gauge_length_m: float = DEFAULT_GAUGE_LENGTH_M,
+) -> float:
+    """Return the phase-to-strain factor in picostrain per radian."""
+    return phase_to_microstrain_per_rad(
+        wavelength_nm,
+        refractive_index,
+        photoelastic_coefficient,
+        gauge_length_m,
+    ) * 1e6
+
+
+def gauge_length_from_header(
+    header: DatHeader,
+    default_m: float = DEFAULT_GAUGE_LENGTH_M,
+) -> tuple[float, str]:
+    """Read gauge length from protocol metadata, with the CDAS spacing convention."""
+    for key, raw_value in header.extra_info.items():
+        normalized_key = str(key).strip().lower().replace(" ", "")
+        if normalized_key not in {"gaugelength", "gaugelength[m]", "标距", "标距(m)"}:
+            continue
+        try:
+            if isinstance(raw_value, str):
+                match = re.search(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", raw_value)
+                value = float(match.group()) if match else float("nan")
+            else:
+                value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value) and value > 0.0:
+            return value, f"头部 {key}"
+    # CDAS's current compact header does not expose a separate gauge-length
+    # field.  Per the acquisition convention, its point interval is the gauge
+    # length used for phase-to-strain conversion.
+    if header.protocol == "CDAS" and np.isfinite(header.point_interval_m) and header.point_interval_m > 0.0:
+        return float(header.point_interval_m), "CDAS 头部点位间隔"
+    return float(default_m), f"头部未提供，默认 {default_m:g} m"
+
+
+def compute_one_sided_spectrum(
+    samples: np.ndarray,
+    sample_rate_hz: float,
+    window_name: str = "Hann",
+) -> OneSidedSpectrum:
+    """Return calibrated one-sided Peak/RMS/Power/PSD/ASD spectra.
+
+    The input is de-meaned before applying the selected symmetric window.  Peak
+    magnitude is corrected by the window coherent gain.  Power and PSD use the
+    window-energy normalization, while ASD is ``sqrt(PSD)``.
+    """
+    values = np.asarray(samples, dtype=np.float64).reshape(-1)
+    sample_count = int(values.size)
+    if sample_count < 2:
+        raise ValueError("采样点不足，至少需要 2 个点才能计算频谱")
+    if not np.isfinite(sample_rate_hz) or sample_rate_hz <= 0.0:
+        raise ValueError("采样率必须大于 0 Hz")
+
+    values = values - np.mean(values)
+    window = make_stft_window(window_name, sample_count).astype(np.float64, copy=False)
+    coherent_gain = float(np.mean(window))
+    window_power = float(np.sum(window * window))
+    if not np.isfinite(coherent_gain) or coherent_gain <= 0.0:
+        raise ValueError("窗函数相干增益无效，无法计算幅值谱")
+    if not np.isfinite(window_power) or window_power <= 0.0:
+        raise ValueError("窗函数能量为 0，无法计算功率谱")
+
+    spectrum = np.fft.rfft(values * window)
+    freqs_hz = np.fft.rfftfreq(sample_count, d=1.0 / float(sample_rate_hz))
+    magnitude_peak = np.abs(spectrum) / (sample_count * coherent_gain)
+    psd = np.square(np.abs(spectrum)) / (float(sample_rate_hz) * window_power)
+
+    # One-sided spectra contain the energy of both positive and negative
+    # frequency components.  DC and (for even N) Nyquist have no counterpart.
+    if magnitude_peak.size > 1:
+        if sample_count % 2 == 0:
+            magnitude_peak[1:-1] *= 2.0
+            psd[1:-1] *= 2.0
+        else:
+            magnitude_peak[1:] *= 2.0
+            psd[1:] *= 2.0
+
+    magnitude_rms = magnitude_peak.copy()
+    if magnitude_rms.size > 1:
+        if sample_count % 2 == 0:
+            magnitude_rms[1:-1] /= np.sqrt(2.0)
+        else:
+            magnitude_rms[1:] /= np.sqrt(2.0)
+
+    frequency_resolution_hz = float(sample_rate_hz) / sample_count
+    power = psd * frequency_resolution_hz
+    asd = np.sqrt(np.maximum(psd, 0.0))
+    return OneSidedSpectrum(
+        freqs_hz=freqs_hz.astype(np.float32),
+        magnitude_peak=magnitude_peak.astype(np.float32),
+        magnitude_rms=magnitude_rms.astype(np.float32),
+        power=power.astype(np.float32),
+        psd=psd.astype(np.float32),
+        asd=asd.astype(np.float32),
+        sample_count=sample_count,
+    )
 
 
 def make_stft_psd_cache(
@@ -1644,15 +2235,21 @@ class PointAnalysisWindow(QtWidgets.QMainWindow):
         self.title_label = QtWidgets.QLabel()
         layout.addWidget(self.title_label)
         self.sample_rate_hz = max(1, header.frequency_hz)
-        self.trace = self.matrix[self.point_index, :].astype(np.float32, copy=False)
+        self.phase_trace = self.matrix[self.point_index, :].astype(np.float32, copy=False)
+        self.trace = self.phase_trace
+        self.initial_gauge_length_m, self.gauge_length_source = gauge_length_from_header(header)
         self.time_axis = np.arange(self.trace.size, dtype=np.float32) / self.sample_rate_hz
         self.full_time_end_s = self.trace.size / self.sample_rate_hz if self.trace.size else 0.0
         self.fft_start_s = 0.0
         self.fft_end_s = self.full_time_end_s
         self.fft_n = 0
         self.freqs = np.empty(0, dtype=np.float32)
+        self.magnitude_peak = np.empty(0, dtype=np.float32)
+        self.magnitude_rms = np.empty(0, dtype=np.float32)
+        self.power = np.empty(0, dtype=np.float32)
         self.magnitude = np.empty(0, dtype=np.float32)
         self.psd = np.empty(0, dtype=np.float32)
+        self.asd = np.empty(0, dtype=np.float32)
 
         point_controls = QtWidgets.QHBoxLayout()
         layout.addLayout(point_controls)
@@ -1684,10 +2281,62 @@ class PointAnalysisWindow(QtWidgets.QMainWindow):
         controls = QtWidgets.QHBoxLayout()
         layout.addLayout(controls)
         self.fft_mode_combo = QtWidgets.QComboBox()
-        self.fft_mode_combo.addItems(["FFT幅值谱(dB)", "PSD功率谱密度(dB re 1 rad^2/Hz)"])
+        for label, key in SPECTRUM_MODE_OPTIONS:
+            self.fft_mode_combo.addItem(label, key)
         controls.addWidget(QtWidgets.QLabel("FFT谱类型"))
         controls.addWidget(self.fft_mode_combo)
+        self.fft_window_combo = QtWidgets.QComboBox()
+        self.fft_window_combo.addItems(list(FFT_WINDOW_OPTIONS))
+        self.fft_window_combo.setCurrentText("Hann")
+        controls.addWidget(QtWidgets.QLabel("窗函数"))
+        controls.addWidget(self.fft_window_combo)
+        self.spectrum_scale_combo = QtWidgets.QComboBox()
+        self.spectrum_scale_combo.addItems(["对数(dB)", "线性值"])
+        controls.addWidget(QtWidgets.QLabel("纵轴刻度"))
+        controls.addWidget(self.spectrum_scale_combo)
         controls.addStretch(1)
+
+        conversion_controls = QtWidgets.QHBoxLayout()
+        layout.addLayout(conversion_controls)
+        self.signal_unit_combo = QtWidgets.QComboBox()
+        self.signal_unit_combo.addItem("相位 (rad)", "rad")
+        self.signal_unit_combo.addItem("应变 (pε)", "picostrain")
+        self.signal_unit_combo.addItem("应变 (με)", "microstrain")
+        self.wavelength_nm_spin = QtWidgets.QDoubleSpinBox()
+        self.refractive_index_spin = QtWidgets.QDoubleSpinBox()
+        self.photoelastic_spin = QtWidgets.QDoubleSpinBox()
+        self.gauge_length_spin = QtWidgets.QDoubleSpinBox()
+        for spin, minimum, maximum, decimals, step, value in (
+            (self.wavelength_nm_spin, 1.0, 10000.0, 3, 1.0, DEFAULT_WAVELENGTH_NM),
+            (self.refractive_index_spin, 1.0, 3.0, 6, 0.0001, DEFAULT_REFRACTIVE_INDEX),
+            (self.photoelastic_spin, 0.001, 2.0, 6, 0.01, DEFAULT_PHOTOELASTIC_COEFFICIENT),
+            (self.gauge_length_spin, 0.001, 100000.0, 6, 0.1, self.initial_gauge_length_m),
+        ):
+            spin.setRange(minimum, maximum)
+            spin.setDecimals(decimals)
+            spin.setSingleStep(step)
+            spin.setKeyboardTracking(False)
+            spin.setValue(value)
+        self.gauge_length_source_label = QtWidgets.QLabel(f"标距来源：{self.gauge_length_source}")
+        self.conversion_factor_label = QtWidgets.QLabel()
+        conversion_controls.addWidget(QtWidgets.QLabel("数据单位"))
+        conversion_controls.addWidget(self.signal_unit_combo)
+        conversion_controls.addSpacing(8)
+        conversion_controls.addWidget(QtWidgets.QLabel("工作波长 λ(nm)"))
+        conversion_controls.addWidget(self.wavelength_nm_spin)
+        conversion_controls.addWidget(QtWidgets.QLabel("折射率 n"))
+        conversion_controls.addWidget(self.refractive_index_spin)
+        conversion_controls.addWidget(QtWidgets.QLabel("光弹性系数 ξ"))
+        conversion_controls.addWidget(self.photoelastic_spin)
+        conversion_controls.addWidget(QtWidgets.QLabel("标距 G(m)"))
+        conversion_controls.addWidget(self.gauge_length_spin)
+        conversion_controls.addStretch(1)
+        conversion_info_controls = QtWidgets.QHBoxLayout()
+        layout.addLayout(conversion_info_controls)
+        conversion_info_controls.addWidget(self.conversion_factor_label)
+        conversion_info_controls.addSpacing(12)
+        conversion_info_controls.addWidget(self.gauge_length_source_label)
+        conversion_info_controls.addStretch(1)
 
         snr_controls = QtWidgets.QHBoxLayout()
         layout.addLayout(snr_controls)
@@ -1796,6 +2445,12 @@ class PointAnalysisWindow(QtWidgets.QMainWindow):
         self.snr_label = QtWidgets.QLabel("峰值谱线SNR: --")
         layout.addWidget(self.snr_label)
         self.fft_mode_combo.currentIndexChanged.connect(self.update_fft_plot)
+        self.fft_window_combo.currentIndexChanged.connect(self.on_fft_window_changed)
+        self.spectrum_scale_combo.currentIndexChanged.connect(self.update_fft_plot)
+        self.signal_unit_combo.currentIndexChanged.connect(self.on_unit_settings_changed)
+        for spin in (self.wavelength_nm_spin, self.refractive_index_spin, self.photoelastic_spin):
+            spin.valueChanged.connect(self.on_unit_settings_changed)
+        self.gauge_length_spin.valueChanged.connect(self.on_gauge_length_changed)
         self.snr_mode_combo.currentIndexChanged.connect(self.update_fft_plot)
         for spin in (
             self.snr_target_freq,
@@ -1804,6 +2459,7 @@ class PointAnalysisWindow(QtWidgets.QMainWindow):
             self.snr_guard_band,
         ):
             spin.valueChanged.connect(self.update_fft_plot)
+        self.update_unit_labels()
         self.sync_point_controls()
         self.show_full_phase_range()
         self.recompute_fft_from_time_range(0.0, self.full_time_end_s, update_controls=True)
@@ -1816,6 +2472,63 @@ class PointAnalysisWindow(QtWidgets.QMainWindow):
             return 0
         index = int(round((float(distance_m) - self.header.position_start_m) / self.header.point_interval_m))
         return max(0, min(self.point_count - 1, index))
+
+    def signal_unit(self) -> str:
+        return str(self.signal_unit_combo.currentData() or "rad")
+
+    def phase_to_display_factor(self) -> float:
+        if self.signal_unit() == "rad":
+            return 1.0
+        microstrain_per_rad = phase_to_microstrain_per_rad(
+            wavelength_nm=float(self.wavelength_nm_spin.value()),
+            refractive_index=float(self.refractive_index_spin.value()),
+            photoelastic_coefficient=float(self.photoelastic_spin.value()),
+            gauge_length_m=float(self.gauge_length_spin.value()),
+        )
+        return microstrain_per_rad * (1e6 if self.signal_unit() == "picostrain" else 1.0)
+
+    def update_unit_labels(self) -> None:
+        try:
+            microstrain_per_rad = phase_to_microstrain_per_rad(
+                wavelength_nm=float(self.wavelength_nm_spin.value()),
+                refractive_index=float(self.refractive_index_spin.value()),
+                photoelastic_coefficient=float(self.photoelastic_spin.value()),
+                gauge_length_m=float(self.gauge_length_spin.value()),
+            )
+            self.conversion_factor_label.setText(
+                f"K={microstrain_per_rad * 1e6:.3f} pε/rad = {microstrain_per_rad:.8g} με/rad（输入相位 rad）"
+            )
+        except ValueError as exc:
+            self.conversion_factor_label.setText(f"参数无效：{exc}")
+
+        if self.signal_unit() == "picostrain":
+            self.time_plot.setTitle("应变数据")
+            self.time_plot.setLabel("left", "Strain", units="pε")
+        elif self.signal_unit() == "microstrain":
+            self.time_plot.setTitle("应变数据")
+            self.time_plot.setLabel("left", "Strain", units="με")
+        else:
+            self.time_plot.setTitle("相位数据")
+            self.time_plot.setLabel("left", "Phase", units="rad")
+
+    def refresh_trace_for_unit(self, recompute_fft: bool = True) -> None:
+        try:
+            factor = self.phase_to_display_factor()
+        except ValueError:
+            return
+        self.trace = (self.phase_trace * factor).astype(np.float32, copy=False)
+        self.time_curve.setData(self.time_axis, self.trace)
+        self.update_unit_labels()
+        if recompute_fft:
+            self.recompute_fft_from_time_range(self.fft_start_s, self.fft_end_s, update_controls=False)
+
+    def on_unit_settings_changed(self) -> None:
+        self.refresh_trace_for_unit()
+        self.show_full_phase_range()
+
+    def on_gauge_length_changed(self) -> None:
+        self.gauge_length_source_label.setText("标距来源：手动设置")
+        self.on_unit_settings_changed()
 
     def sync_point_controls(self) -> None:
         self.distance_m = self.index_to_distance(self.point_index)
@@ -1849,8 +2562,8 @@ class PointAnalysisWindow(QtWidgets.QMainWindow):
             return
 
         self.point_index = next_index
-        self.trace = self.matrix[self.point_index, :].astype(np.float32, copy=False)
-        self.time_curve.setData(self.time_axis, self.trace)
+        self.phase_trace = self.matrix[self.point_index, :].astype(np.float32, copy=False)
+        self.refresh_trace_for_unit(recompute_fft=False)
         self.sync_point_controls()
         self.show_full_phase_range()
         self.recompute_fft_from_time_range(self.fft_start_s, self.fft_end_s, update_controls=False)
@@ -1873,6 +2586,25 @@ class PointAnalysisWindow(QtWidgets.QMainWindow):
 
     def show_full_fft_time_range(self) -> None:
         self.recompute_fft_from_time_range(0.0, self.full_time_end_s, update_controls=True)
+
+    def on_fft_window_changed(self) -> None:
+        """Recompute only when the spectral window changes."""
+        self.recompute_fft_from_time_range(
+            self.fft_start_s,
+            self.fft_end_s,
+            update_controls=False,
+        )
+
+    def clear_fft_spectrum(self) -> None:
+        self.freqs = np.empty(0, dtype=np.float32)
+        self.magnitude_peak = np.empty(0, dtype=np.float32)
+        self.magnitude_rms = np.empty(0, dtype=np.float32)
+        self.power = np.empty(0, dtype=np.float32)
+        # Keep the legacy attribute as an alias for code that reads it for SNR.
+        self.magnitude = self.magnitude_peak
+        self.psd = np.empty(0, dtype=np.float32)
+        self.asd = np.empty(0, dtype=np.float32)
+        self.fft_n = 0
 
     def recompute_fft_from_time_range(
         self,
@@ -1903,41 +2635,29 @@ class PointAnalysisWindow(QtWidgets.QMainWindow):
         self.fft_start_s = actual_start_s
         self.fft_end_s = actual_end_s
         if segment.size < 2:
-            self.freqs = np.empty(0, dtype=np.float32)
-            self.magnitude = np.empty(0, dtype=np.float32)
-            self.psd = np.empty(0, dtype=np.float32)
-            self.fft_n = 0
+            self.clear_fft_spectrum()
             self.update_fft_plot("FFT时间范围内采样点不足")
             return False
 
         n = 1 << (segment.size.bit_length() - 1)
         if n < 2:
-            self.freqs = np.empty(0, dtype=np.float32)
-            self.magnitude = np.empty(0, dtype=np.float32)
-            self.psd = np.empty(0, dtype=np.float32)
-            self.fft_n = 0
+            self.clear_fft_spectrum()
             self.update_fft_plot("FFT时间范围内采样点不足")
             return False
 
-        samples = segment[:n].astype(np.float32, copy=False)
-        samples = samples - np.mean(samples)
-        window_arr = np.hanning(n).astype(np.float32)
-        spectrum = np.fft.rfft(samples * window_arr)
-        self.freqs = np.fft.rfftfreq(n, d=1.0 / self.sample_rate_hz).astype(np.float32)
-        self.magnitude = (np.abs(spectrum) * 2.0 / n).astype(np.float32)
-        window_power = float(np.sum(window_arr * window_arr))
-        if window_power > 0.0:
-            psd = (np.abs(spectrum) ** 2) / (self.sample_rate_hz * window_power)
-            if psd.size > 1:
-                if n % 2 == 0:
-                    if psd.size > 2:
-                        psd[1:-1] *= 2.0
-                else:
-                    psd[1:] *= 2.0
-            self.psd = psd.astype(np.float32)
-        else:
-            self.psd = np.zeros_like(self.freqs, dtype=np.float32)
-        self.fft_n = int(n)
+        result = compute_one_sided_spectrum(
+            segment[:n],
+            self.sample_rate_hz,
+            self.fft_window_combo.currentText(),
+        )
+        self.freqs = result.freqs_hz
+        self.magnitude_peak = result.magnitude_peak
+        self.magnitude_rms = result.magnitude_rms
+        self.power = result.power
+        self.psd = result.psd
+        self.asd = result.asd
+        self.magnitude = self.magnitude_peak
+        self.fft_n = result.sample_count
         self.update_fft_plot()
         return True
 
@@ -1992,75 +2712,47 @@ class PointAnalysisWindow(QtWidgets.QMainWindow):
         self.time_plot.setXRange(x0, x1, padding=0.0)
         self.time_plot.setYRange(y0, y1, padding=0.0)
 
-    def _update_fft_plot_legacy(self) -> None:
-        if self.fft_mode_combo.currentIndex() == 0:
-            y = 20.0 * np.log10(np.maximum(self.magnitude, 1e-12))
-            self.freq_plot.setTitle("FFT频率谱 - dB谱(幅值)")
-            self.freq_plot.setLabel("left", "Amplitude", units="dB")
-        else:
-            y = 10.0 * np.log10(np.maximum(self.psd, 1e-24))
-            self.freq_plot.setTitle("PSD功率谱密度 - dB re 1 rad^2/Hz")
-            self.freq_plot.setLabel("left", "PSD", units="dB re 1 rad^2/Hz")
-        self.freq_curve.setData(self.freqs, y)
-        mode = "target" if self.snr_mode_combo.currentIndex() == 1 else "auto"
-        snr = calculate_peak_line_snr(
-            self.freqs,
-            self.magnitude,
-            mode=mode,
-            target_freq_hz=float(self.snr_target_freq.value()),
-            search_half_width_hz=float(self.snr_search_half_width.value()),
-            noise_window_hz=float(self.snr_noise_window.value()),
-            guard_band_hz=float(self.snr_guard_band.value()),
-            noise_mode=getattr(self, "snr_noise_mode", "local"),
-            exclude_band_hz=float(getattr(self, "snr_exclude_band_hz", 5.0)),
-        )
-        if snr is None:
-            self.snr_label.setText("峰值谱线SNR: 未找到有效特征峰")
-        else:
-            self.snr_label.setText(
-                "峰值谱线SNR: "
-                f"{snr['snr_db']:.4g} dB    "
-                f"模式 {snr['mode_text']}    "
-                "选峰依据 峰值谱线SNR最大    "
-                f"特征峰 {snr['peak_freq']:.3f} Hz / {snr['peak_value_db']:.4g} dB    "
-                f"局部噪声 {snr['noise_level_db']:.4g} dB    "
-                f"相对底噪突出度 {snr['score_db']:.4g} dB"
-            )
-        if snr is not None:
-            self.snr_label.setText(
-                "峰值谱线SNR: "
-                f"{snr['snr_db']:.4g} dB    "
-                f"模式 {snr['mode_text']}    "
-                f"底噪口径 {snr.get('noise_mode_text', '局部底噪')}    "
-                f"特征峰 {snr['peak_freq']:.3f} Hz / {snr['peak_value_db']:.4g} dB    "
-                f"底噪 {snr['noise_level_db']:.4g} dB"
-            )
-        self.freq_plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
-
-
     def update_fft_plot(self, message: str | None = None) -> None:
         if message is not None and not isinstance(message, str):
             message = None
         fft_info = f"FFT时间 {self.fft_start_s:.3f}~{self.fft_end_s:.3f} s，n={self.fft_n}"
-        if self.freqs.size == 0 or self.magnitude.size == 0 or self.psd.size == 0 or self.fft_n < 2:
+        if self.freqs.size == 0 or self.magnitude_peak.size == 0 or self.fft_n < 2:
             self.freq_curve.setData([], [])
             self.freq_plot.setTitle(f"频谱 - 无有效数据 - {fft_info}")
             self.snr_label.setText(f"峰值谱线SNR: {message or 'FFT时间范围内采样点不足'}    {fft_info}")
             return
 
-        if self.fft_mode_combo.currentIndex() == 0:
-            y = 20.0 * np.log10(np.maximum(self.magnitude, 1e-12))
-            self.freq_plot.setTitle(f"FFT幅值谱 - {fft_info}")
-            self.freq_plot.setLabel("left", "Amplitude", units="dB")
+        logarithmic = self.spectrum_scale_combo.currentIndex() == 0
+        spectrum_mode = self.fft_mode_combo.currentData()
+        amplitude_unit = {
+            "picostrain": "pε",
+            "microstrain": "με",
+        }.get(self.signal_unit(), "rad")
+        power_unit = f"{amplitude_unit}²"
+        specs: dict[str, tuple[np.ndarray, str, str, str, float]] = {
+            "magnitude-peak": (self.magnitude_peak, "Magnitude (Peak)", amplitude_unit, f"dB re 1 {amplitude_unit}", 20.0),
+            "magnitude-rms": (self.magnitude_rms, "Magnitude (RMS)", amplitude_unit, f"dB re 1 {amplitude_unit}", 20.0),
+            "power": (self.power, "Power spectrum", power_unit, f"dB re 1 {power_unit}", 10.0),
+            "psd": (self.psd, "Power Spectral Density (PSD)", f"{power_unit}/Hz", f"dB re 1 {power_unit}/Hz", 10.0),
+            "asd": (self.asd, "Amplitude Spectral Density (ASD)", f"{amplitude_unit}/√Hz", f"dB re 1 {amplitude_unit}/√Hz", 20.0),
+        }
+        values, name, linear_unit, db_unit, db_factor = specs.get(
+            str(spectrum_mode), specs["magnitude-peak"]
+        )
+        if logarithmic:
+            floor = 1e-24 if db_factor == 10.0 else 1e-12
+            y = db_factor * np.log10(np.maximum(values, floor))
+            self.freq_plot.setTitle(f"{name} (dB) - {fft_info}")
+            self.freq_plot.setLabel("left", name, units=db_unit)
         else:
-            y = 10.0 * np.log10(np.maximum(self.psd, 1e-24))
-            self.freq_plot.setTitle(f"PSD功率谱密度(dB re 1 rad^2/Hz) - {fft_info}")
-            self.freq_plot.setLabel("left", "PSD", units="dB re 1 rad^2/Hz")
+            y = values
+            self.freq_plot.setTitle(f"{name} (线性) - {fft_info}")
+            self.freq_plot.setLabel("left", name, units=linear_unit)
         self.freq_curve.setData(self.freqs, y)
         mode = "target" if self.snr_mode_combo.currentIndex() == 1 else "auto"
         snr = calculate_peak_line_snr(
             self.freqs,
-            self.magnitude,
+            self.magnitude_peak,
             mode=mode,
             target_freq_hz=float(self.snr_target_freq.value()),
             search_half_width_hz=float(self.snr_search_half_width.value()),
@@ -3234,16 +3926,824 @@ class Spectrum3DWindow(QtWidgets.QMainWindow):
         window.show()
 
 
+class ChannelAxisItem(pg.AxisItem):
+    """Top axis that translates distance coordinates into zero-based channels."""
+
+    def __init__(self) -> None:
+        super().__init__(orientation="top")
+        self.header: DatHeader | None = None
+
+    def set_header(self, header: DatHeader) -> None:
+        self.header = header
+        self.picture = None
+        self.update()
+
+    def tickStrings(self, values: list[float], scale: float, spacing: float) -> list[str]:  # type: ignore[override]
+        if self.header is None or self.header.point_interval_m <= 0.0:
+            return ["" for _ in values]
+        return [str(int(round((value - self.header.position_start_m) / self.header.point_interval_m))) for value in values]
+
+
+class ClickableImageItem(pg.ImageItem):
+    sig_clicked = QtCore.pyqtSignal(object)
+
+    def mouseClickEvent(self, event: object) -> None:
+        if hasattr(event, "button") and event.button() != QtCore.Qt.MouseButton.LeftButton:
+            if hasattr(event, "ignore"):
+                event.ignore()
+            return
+        self.sig_clicked.emit(event.scenePos() if hasattr(event, "scenePos") else event)
+        if hasattr(event, "accept"):
+            event.accept()
+
+
+class PhaseHeatmapPane(QtWidgets.QWidget):
+    """Small phase heatmap with channel numbers above and distance below."""
+
+    sig_data_clicked = QtCore.pyqtSignal(object)
+
+    def __init__(self, title: str) -> None:
+        super().__init__()
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.channel_axis = ChannelAxisItem()
+        self.plot = pg.PlotWidget(axisItems={"top": self.channel_axis})
+        self.plot.setTitle(title)
+        self.plot.showAxis("top")
+        self.plot.setLabel("top", "Channel (0-based)")
+        self.plot.setLabel("bottom", "Distance", units="m")
+        self.plot.setLabel("left", "Time", units="s")
+        self.plot.invertY(True)
+        self.plot.showGrid(x=True, y=True, alpha=0.15)
+        self.image_item = ClickableImageItem()
+        self.image_item.setAcceptedMouseButtons(QtCore.Qt.MouseButton.LeftButton)
+        self.plot.addItem(self.image_item)
+        self.image_item.sig_clicked.connect(self._on_image_clicked)
+        self.image_item.setLookupTable(pg.colormap.get("turbo").getLookupTable(0.0, 1.0, 256))
+        layout.addWidget(self.plot)
+
+    def _on_image_clicked(self, scene_position: object) -> None:
+        if not isinstance(scene_position, QtCore.QPointF):
+            return
+        self.sig_data_clicked.emit(self.plot.getViewBox().mapSceneToView(scene_position))
+
+    def set_data(self, matrix: np.ndarray, header: DatHeader, levels: tuple[float, float]) -> None:
+        display = make_display_matrix_max_abs(np.asarray(matrix, dtype=np.float32))
+        self.image_item.setImage(display.T, autoLevels=False)
+        self.image_item.setLevels(levels)
+        width = max(header.distance_span_m, header.point_interval_m)
+        self.image_item.setRect(QtCore.QRectF(header.position_start_m, 0.0, width, header.time_span_s))
+        self.channel_axis.set_header(header)
+        self.plot.setXRange(header.position_start_m, header.position_start_m + width, padding=0.02)
+        self.plot.setYRange(0.0, header.time_span_s, padding=0.02)
+
+
+@dataclass
+class ProcessingTarget:
+    path: Path
+    header: DatHeader
+    original: np.ndarray | None
+    working: np.ndarray | None
+    detected_frequencies_hz: dict[int, np.ndarray] = field(default_factory=dict)
+
+
+class ProcessingWorkspaceWindow(QtWidgets.QMainWindow):
+    """Separate, composable target filtering and source replacement workspace."""
+
+    def __init__(self, targets: list[tuple[Path, DatHeader, np.ndarray]] | None = None) -> None:
+        super().__init__()
+        if not targets:
+            raise ValueError("至少需要一个目标文件")
+        self.setWindowTitle("TDAS 数据处理：滤波与通道替换")
+        self.resize(1400, 940)
+        self.targets = [ProcessingTarget(path, header, np.asarray(matrix, dtype=np.float32).copy(), np.asarray(matrix, dtype=np.float32).copy()) for path, header, matrix in targets]
+        self.active_target_index = 0
+        self.source_data: dict[Path, tuple[np.ndarray, DatHeader]] = {}
+        self.mapping_sets: dict[Path, list[ChannelReplacement]] = {item.path: [] for item in self.targets}
+        self.analysis_windows: list[QtWidgets.QMainWindow] = []
+        self._building_mappings = False
+        self._build_ui()
+        self.load_target(0)
+
+    @property
+    def target(self) -> ProcessingTarget:
+        return self.targets[self.active_target_index]
+
+    def _build_ui(self) -> None:
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+        root = QtWidgets.QVBoxLayout(central)
+        controls = QtWidgets.QHBoxLayout()
+        root.addLayout(controls)
+        self.target_combo = QtWidgets.QComboBox()
+        for item in self.targets:
+            self.target_combo.addItem(item.path.name, item.path)
+        self.filter_start = QtWidgets.QSpinBox()
+        self.filter_end = QtWidgets.QSpinBox()
+        self.fft_channel = QtWidgets.QSpinBox()
+        self.min_frequency = QtWidgets.QDoubleSpinBox()
+        self.threshold = QtWidgets.QDoubleSpinBox()
+        self.q_factor = QtWidgets.QDoubleSpinBox()
+        self.min_frequency.setSuffix(" Hz")
+        self.threshold.setSuffix(" dB")
+        self.q_factor.setPrefix("Q=")
+        self.threshold.setRange(0.0, 100.0)
+        self.threshold.setValue(8.0)
+        self.q_factor.setRange(1.0, 1000.0)
+        self.q_factor.setValue(50.0)
+        source_btn = QtWidgets.QPushButton("添加替换来源")
+        filter_btn = QtWidgets.QPushButton("仅执行频谱平坦化")
+        replace_btn = QtWidgets.QPushButton("仅执行通道替换")
+        reset_btn = QtWidgets.QPushButton("恢复当前目标原始数据")
+        export_btn = QtWidgets.QPushButton("导出全部目标")
+        for label, widget in (("目标文件", self.target_combo), ("滤波通道", self.filter_start), ("至", self.filter_end), ("最低频率", self.min_frequency), ("峰值阈值", self.threshold), ("陷波器", self.q_factor)):
+            controls.addWidget(QtWidgets.QLabel(label))
+            controls.addWidget(widget)
+        controls.addWidget(source_btn)
+        controls.addWidget(filter_btn)
+        controls.addWidget(replace_btn)
+        controls.addWidget(reset_btn)
+        controls.addWidget(export_btn)
+
+        mapping_controls = QtWidgets.QHBoxLayout()
+        root.addLayout(mapping_controls)
+        mapping_controls.addWidget(QtWidgets.QLabel("当前目标的替换映射（0 基闭区间，来源文件时长必须与当前目标一致）"))
+        add_mapping_btn = QtWidgets.QPushButton("添加映射")
+        remove_mapping_btn = QtWidgets.QPushButton("删除选中映射")
+        mapping_controls.addWidget(add_mapping_btn)
+        mapping_controls.addWidget(remove_mapping_btn)
+        mapping_controls.addStretch(1)
+        self.mapping_table = QtWidgets.QTableWidget(0, 5)
+        self.mapping_table.setHorizontalHeaderLabels(["来源文件", "目标起始", "目标结束", "来源起始", "来源结束"])
+        self.mapping_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for column in range(1, 5):
+            self.mapping_table.horizontalHeader().setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.mapping_table.setMaximumHeight(155)
+        root.addWidget(self.mapping_table)
+
+        heatmaps = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.target_pane = PhaseHeatmapPane("目标相位（处理后直接更新此图）")
+        self.source_pane = PhaseHeatmapPane("当前替换来源（按目标时间轴重采样）")
+        self.source_pane.plot.setYLink(self.target_pane.plot)
+        heatmaps.addWidget(self.target_pane)
+        heatmaps.addWidget(self.source_pane)
+        heatmaps.setSizes([700, 700])
+        root.addWidget(heatmaps, stretch=1)
+
+        fft_layout = QtWidgets.QHBoxLayout()
+        root.addLayout(fft_layout)
+        fft_layout.addWidget(QtWidgets.QLabel("FFT/点位分析通道"))
+        fft_layout.addWidget(self.fft_channel)
+        self.fft_plot = pg.PlotWidget(title="当前目标：原始与当前处理结果 FFT")
+        self.fft_plot.setLabel("bottom", "Frequency", units="Hz")
+        self.fft_plot.setLabel("left", "Amplitude", units="dB")
+        self.fft_plot.addLegend()
+        self.fft_before = self.fft_plot.plot(pen=pg.mkPen("#777777", width=1), name="原始")
+        self.fft_after = self.fft_plot.plot(pen=pg.mkPen("#d62728", width=1), name="当前结果")
+        fft_layout.addWidget(self.fft_plot, stretch=1)
+        self.peak_list = QtWidgets.QPlainTextEdit()
+        self.peak_list.setReadOnly(True)
+        self.peak_list.setMinimumWidth(260)
+        fft_layout.addWidget(self.peak_list)
+        self.status = QtWidgets.QLabel("滤波与替换可分别、重复执行；左图始终显示当前目标处理结果。点击左图任一点打开点位分析。")
+        root.addWidget(self.status)
+
+        self.target_combo.currentIndexChanged.connect(self.on_target_changed)
+        source_btn.clicked.connect(self.add_sources)
+        filter_btn.clicked.connect(self.apply_filter)
+        replace_btn.clicked.connect(self.apply_replacements)
+        reset_btn.clicked.connect(self.reset_target)
+        export_btn.clicked.connect(self.export_all)
+        add_mapping_btn.clicked.connect(self.add_mapping)
+        remove_mapping_btn.clicked.connect(self.remove_selected_mapping)
+        self.mapping_table.itemSelectionChanged.connect(self.update_source_preview)
+        self.fft_channel.valueChanged.connect(self.update_fft)
+        self.target_pane.plot.scene().sigMouseClicked.connect(self.on_target_heatmap_clicked)
+
+    def settings(self) -> SpectralFlatteningSettings:
+        return SpectralFlatteningSettings(float(self.min_frequency.value()), float(self.threshold.value()), float(self.q_factor.value()))
+
+    @staticmethod
+    def _levels(*arrays: np.ndarray) -> tuple[float, float]:
+        return percentile_color_levels(np.concatenate([np.asarray(value, dtype=np.float32).reshape(-1) for value in arrays]), 1.0, 99.0, -1.0, 1.0)
+
+    def configure_target_controls(self) -> None:
+        maximum = self.target.header.point_count - 1
+        for spin in (self.filter_start, self.filter_end, self.fft_channel):
+            spin.blockSignals(True)
+            spin.setRange(0, maximum)
+            spin.blockSignals(False)
+        self.filter_start.setValue(min(self.filter_start.value(), maximum))
+        self.filter_end.setValue(max(self.filter_start.value(), min(self.filter_end.value(), maximum)))
+        self.fft_channel.setValue(min(self.fft_channel.value(), maximum))
+        self.min_frequency.setRange(0.0, max(0.0, self.target.header.frequency_hz / 2.0 - 1e-6))
+        self.min_frequency.setValue(min(max(200.0, self.min_frequency.value()), self.min_frequency.maximum()))
+
+    def refresh_target_view(self) -> None:
+        levels = self._levels(self.target.original, self.target.working)
+        self.target_pane.set_data(self.target.working, self.target.header, levels)
+        self.update_fft()
+
+    def on_target_changed(self, index: int) -> None:
+        if index < 0 or index == self.active_target_index:
+            return
+        self.save_current_mappings()
+        self.load_target(index)
+
+    def load_target(self, index: int) -> None:
+        if index < 0:
+            return
+        self.active_target_index = index
+        self.target_combo.blockSignals(True)
+        self.target_combo.setCurrentIndex(index)
+        self.target_combo.blockSignals(False)
+        self.configure_target_controls()
+        self.rebuild_mapping_table()
+        self.refresh_target_view()
+        self.update_source_preview()
+
+    def add_sources(self) -> None:
+        names, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "选择替换来源文件", str(self.target.path.parent), "Data files (*.dat *.tdms);;All files (*.*)")
+        errors: list[str] = []
+        added = 0
+        for name in names:
+            path = Path(name)
+            try:
+                header = read_header(path)
+                if header.protocol != self.target.header.protocol:
+                    raise ValueError(f"协议不同: {header.protocol}")
+                self.source_data[path] = (read_signal_matrix(path, header), header)
+                added += 1
+            except Exception as exc:
+                errors.append(f"{path.name}: {exc}")
+        self.refresh_source_combos()
+        self.status.setText(f"已加载 {added} 个来源文件" + ("；" + " | ".join(errors) if errors else ""))
+
+    @staticmethod
+    def _range_spin(maximum: int, value: int) -> QtWidgets.QSpinBox:
+        spin = QtWidgets.QSpinBox()
+        spin.setRange(0, max(0, maximum))
+        spin.setValue(max(0, min(value, maximum)))
+        return spin
+
+    def refresh_source_combos(self) -> None:
+        for row in range(self.mapping_table.rowCount()):
+            combo = self.mapping_table.cellWidget(row, 0)
+            if isinstance(combo, QtWidgets.QComboBox):
+                selected = combo.currentData()
+                combo.blockSignals(True)
+                combo.clear()
+                for path in self.source_data:
+                    combo.addItem(path.name, path)
+                current_index = combo.findData(selected)
+                if current_index >= 0:
+                    combo.setCurrentIndex(current_index)
+                combo.blockSignals(False)
+
+    def add_mapping(self, mapping: ChannelReplacement | None = None) -> None:
+        if not self.source_data:
+            QtWidgets.QMessageBox.information(self, "数据处理", "请先添加替换来源文件")
+            return
+        row = self.mapping_table.rowCount()
+        self.mapping_table.insertRow(row)
+        combo = QtWidgets.QComboBox()
+        for path in self.source_data:
+            combo.addItem(path.name, path)
+        if mapping is not None:
+            combo.setCurrentIndex(max(0, combo.findData(mapping.source_path)))
+        combo.currentIndexChanged.connect(lambda _value, r=row: self.update_mapping_limits(r))
+        self.mapping_table.setCellWidget(row, 0, combo)
+        values = (mapping.target_start, mapping.target_end, mapping.source_start, mapping.source_end) if mapping else (0, self.target.header.point_count - 1, 0, self.target.header.point_count - 1)
+        for column, value in zip(range(1, 5), values):
+            self.mapping_table.setCellWidget(row, column, self._range_spin(self.target.header.point_count - 1, value))
+        self.update_mapping_limits(row)
+
+    def update_mapping_limits(self, row: int) -> None:
+        combo = self.mapping_table.cellWidget(row, 0)
+        if not isinstance(combo, QtWidgets.QComboBox) or not isinstance(combo.currentData(), Path):
+            return
+        source_header = self.source_data[combo.currentData()][1]
+        for column in (3, 4):
+            spin = self.mapping_table.cellWidget(row, column)
+            if isinstance(spin, QtWidgets.QSpinBox):
+                spin.setMaximum(source_header.point_count - 1)
+
+    def mappings(self) -> list[ChannelReplacement]:
+        mappings: list[ChannelReplacement] = []
+        for row in range(self.mapping_table.rowCount()):
+            combo = self.mapping_table.cellWidget(row, 0)
+            spins = [self.mapping_table.cellWidget(row, column) for column in range(1, 5)]
+            if not isinstance(combo, QtWidgets.QComboBox) or not isinstance(combo.currentData(), Path) or not all(isinstance(spin, QtWidgets.QSpinBox) for spin in spins):
+                raise ValueError(f"第 {row + 1} 条替换映射不完整")
+            mappings.append(ChannelReplacement(combo.currentData(), *(int(spin.value()) for spin in spins if isinstance(spin, QtWidgets.QSpinBox))))
+        return mappings
+
+    def save_current_mappings(self) -> None:
+        if self._building_mappings:
+            return
+        try:
+            self.mapping_sets[self.target.path] = self.mappings()
+        except ValueError:
+            pass
+
+    def rebuild_mapping_table(self) -> None:
+        self._building_mappings = True
+        self.mapping_table.setRowCount(0)
+        for mapping in self.mapping_sets[self.target.path]:
+            if mapping.source_path in self.source_data:
+                self.add_mapping(mapping)
+        self._building_mappings = False
+
+    def remove_selected_mapping(self) -> None:
+        for row in sorted({item.row() for item in self.mapping_table.selectedItems()}, reverse=True):
+            self.mapping_table.removeRow(row)
+        self.save_current_mappings()
+
+    def apply_filter(self) -> None:
+        try:
+            working, detected = flatten_spectral_channels(self.target.working, self.target.header.frequency_hz, int(self.filter_start.value()), int(self.filter_end.value()), self.settings())
+            self.target.working = working
+            self.target.detected_frequencies_hz.update(detected)
+            self.refresh_target_view()
+            self.status.setText("频谱平坦化已应用到目标；可继续替换或重复滤波。")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "滤波失败", str(exc))
+
+    def apply_replacements(self) -> None:
+        try:
+            mappings = self.mappings()
+            for mapping in mappings:
+                source_matrix, source_header = self.source_data[mapping.source_path]
+                validate_replacement_headers(self.target.header, source_header)
+                target_count = mapping.target_end - mapping.target_start + 1
+                source_count = mapping.source_end - mapping.source_start + 1
+                if mapping.target_start < 0 or mapping.target_end >= self.target.header.point_count or mapping.source_start < 0 or mapping.source_end >= source_header.point_count or target_count != source_count:
+                    raise ValueError("替换通道范围无效，且目标与来源通道数必须一致")
+                block = resample_matrix_to_target(source_matrix[mapping.source_start : mapping.source_end + 1], replace(source_header, point_count=source_count), replace(self.target.header, point_count=source_count))
+                self.target.working[mapping.target_start : mapping.target_end + 1] = block
+            self.save_current_mappings()
+            self.refresh_target_view()
+            self.update_source_preview()
+            self.status.setText("通道替换已应用到目标；未执行任何滤波。")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "替换失败", str(exc))
+
+    def reset_target(self) -> None:
+        self.target.working = self.target.original.copy()
+        self.target.detected_frequencies_hz.clear()
+        self.refresh_target_view()
+        self.status.setText("当前目标已恢复原始数据。")
+
+    def update_source_preview(self) -> None:
+        row = self.mapping_table.currentRow()
+        if row < 0:
+            return
+        try:
+            mapping = self.mappings()[row]
+            source_matrix, source_header = self.source_data[mapping.source_path]
+            validate_replacement_headers(self.target.header, source_header)
+            block = resample_matrix_to_target(source_matrix[mapping.source_start : mapping.source_end + 1], replace(source_header, point_count=mapping.source_end - mapping.source_start + 1), replace(self.target.header, point_count=mapping.source_end - mapping.source_start + 1))
+            display_header = replace(source_header, point_count=block.shape[0], sample_count=self.target.header.sample_count, frequency_hz=self.target.header.frequency_hz, acquisition_time_s=self.target.header.time_span_s, position_start_m=source_header.position_start_m + mapping.source_start * source_header.point_interval_m)
+            levels = self._levels(self.target.original, self.target.working, block)
+            self.target_pane.image_item.setLevels(levels)
+            self.source_pane.set_data(block, display_header, levels)
+        except Exception as exc:
+            self.status.setText(f"来源预览不可用: {exc}")
+
+    def update_fft(self) -> None:
+        channel = int(self.fft_channel.value())
+        before = self.target.original[channel] - np.mean(self.target.original[channel])
+        after = self.target.working[channel] - np.mean(self.target.working[channel])
+        frequencies = np.fft.rfftfreq(before.size, 1.0 / self.target.header.frequency_hz)
+        self.fft_before.setData(frequencies[1:], 20.0 * np.log10(np.maximum(np.abs(np.fft.rfft(before))[1:], 1e-12)))
+        self.fft_after.setData(frequencies[1:], 20.0 * np.log10(np.maximum(np.abs(np.fft.rfft(after))[1:], 1e-12)))
+        peaks = self.target.detected_frequencies_hz.get(channel, np.array([], dtype=float))
+        self.peak_list.setPlainText("未对该通道执行自动陷波" if peaks.size == 0 else "该通道检测到的陷波频率 (Hz):\n" + ", ".join(f"{value:.4g}" for value in peaks))
+
+    def on_target_heatmap_clicked(self, event: object) -> None:
+        if not hasattr(event, "scenePos"):
+            return
+        point = self.target_pane.plot.getViewBox().mapSceneToView(event.scenePos())
+        header = self.target.header
+        if point.y() < 0.0 or point.y() > header.time_span_s:
+            return
+        index = int(round((point.x() - header.position_start_m) / max(header.point_interval_m, 1e-12)))
+        if not 0 <= index < header.point_count:
+            return
+        window = PointAnalysisWindow(self.target.working, header, index)
+        self.analysis_windows.append(window)
+        window.show()
+
+    def export_all(self) -> None:
+        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "选择处理结果导出目录", str(self.target.path.parent))
+        if not directory:
+            return
+        try:
+            output_dir = Path(directory)
+            used_names: set[str] = set()
+            for index, item in enumerate(self.targets, start=1):
+                name = f"{item.path.stem}_processed{item.path.suffix}"
+                if name.casefold() in used_names:
+                    name = f"{item.path.stem}_{index}_processed{item.path.suffix}"
+                used_names.add(name.casefold())
+                output = output_dir / name
+                export_processed_signal(item.path, item.header, item.working, output)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "导出失败", str(exc))
+            return
+        self.status.setText(f"已导出并校验 {len(self.targets)} 个目标文件: {directory}")
+
+
+class SimpleProcessingWorkspaceWindow(QtWidgets.QMainWindow):
+    """File-group processor: filter and replacement are deliberately separate."""
+
+    def __init__(self, targets: list[tuple[Path, DatHeader, np.ndarray]] | None = None) -> None:
+        super().__init__()
+        self.setWindowTitle("TDAS 数据处理：滤波 / 通道替换")
+        self.resize(1420, 860)
+        self.records = [ProcessingTarget(p, h, np.asarray(m, np.float32).copy(), np.asarray(m, np.float32).copy()) for p, h, m in (targets or [])]
+        self.sources: dict[Path, tuple[np.ndarray, DatHeader]] = {}
+        self.point_windows: list[PointAnalysisWindow] = []
+        self._build()
+        if self.records:
+            self.target_list.selectAll()
+            self.refresh_target()
+
+    def _build(self) -> None:
+        root = QtWidgets.QVBoxLayout()
+        central = QtWidgets.QWidget(); central.setLayout(root); self.setCentralWidget(central)
+        files = QtWidgets.QHBoxLayout(); root.addLayout(files)
+        self.target_list = QtWidgets.QListWidget(); self.target_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        for index, item in enumerate(self.records):
+            row = QtWidgets.QListWidgetItem(item.path.name); row.setData(QtCore.Qt.ItemDataRole.UserRole, index); self.target_list.addItem(row)
+        self.source_list = QtWidgets.QListWidget(); self.source_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        choose_target_folder = QtWidgets.QPushButton("选择目标文件夹")
+        add_source = QtWidgets.QPushButton("选择替换文件")
+        choose_source_folder = QtWidgets.QPushButton("选择替换文件夹")
+        source_box = QtWidgets.QVBoxLayout(); source_box.addWidget(QtWidgets.QLabel("替换来源（可多选，按时间拼接）")); source_box.addWidget(self.source_list); source_box.addWidget(add_source); source_box.addWidget(choose_source_folder)
+        target_box = QtWidgets.QVBoxLayout(); target_box.addWidget(QtWidgets.QLabel("目标文件（可多选，按时间拼接）")); target_box.addWidget(self.target_list); target_box.addWidget(choose_target_folder)
+        files.addLayout(target_box, 1); files.addLayout(source_box, 1)
+        controls = QtWidgets.QHBoxLayout(); root.addLayout(controls)
+        self.start = QtWidgets.QSpinBox(); self.end = QtWidgets.QSpinBox(); self.reference = QtWidgets.QSpinBox(); self.minimum = QtWidgets.QDoubleSpinBox(); self.threshold = QtWidgets.QDoubleSpinBox(); self.q = QtWidgets.QDoubleSpinBox()
+        self.color_limit = QtWidgets.QDoubleSpinBox()
+        self.minimum.setSuffix(" Hz"); self.threshold.setSuffix(" dB"); self.q.setPrefix("Q="); self.threshold.setRange(0, 100); self.threshold.setValue(8); self.q.setRange(1, 1000); self.q.setValue(50)
+        self.color_limit.setRange(0.01, 1_000_000.0); self.color_limit.setDecimals(3); self.color_limit.setSingleStep(0.1); self.color_limit.setKeyboardTracking(False); self.color_limit.setValue(1.58)
+        filter_button = QtWidgets.QPushButton("仅滤波目标")
+        replace_button = QtWidgets.QPushButton("仅替换通道")
+        reset_button = QtWidgets.QPushButton("恢复目标原始数据")
+        export_button = QtWidgets.QPushButton("导出所选目标")
+        for label, widget in (("滤波通道", self.start), ("至", self.end), ("参考通道", self.reference), ("最低频率", self.minimum), ("阈值", self.threshold), ("陷波", self.q)):
+            controls.addWidget(QtWidgets.QLabel(label)); controls.addWidget(widget)
+        controls.addWidget(filter_button); controls.addWidget(replace_button); controls.addWidget(reset_button); controls.addWidget(export_button)
+        batch_controls = QtWidgets.QHBoxLayout(); root.addLayout(batch_controls)
+        batch_filter = QtWidgets.QPushButton("批量滤波所有目标并导出")
+        batch_replace = QtWidgets.QPushButton("批量替换所有目标并导出")
+        batch_controls.addWidget(batch_filter)
+        batch_controls.addWidget(batch_replace)
+        self.batch_progress = QtWidgets.QProgressBar(); self.batch_progress.setRange(0, 1); self.batch_progress.setValue(0); self.batch_progress.setFormat("等待批量滤波")
+        batch_controls.addWidget(self.batch_progress, 1)
+        color_controls = QtWidgets.QHBoxLayout(); root.addLayout(color_controls)
+        color_controls.addWidget(QtWidgets.QLabel("两幅相位图共用色条范围 ±："))
+        color_controls.addWidget(self.color_limit)
+        color_controls.addWidget(QtWidgets.QLabel("（直接输入数值，实际显示范围为 -值 ～ +值）"))
+        color_controls.addStretch(1)
+        maps = QtWidgets.QHBoxLayout(); root.addLayout(maps)
+        maps.addWidget(QtWidgets.QLabel("通道映射（0 基、闭区间；仅映射目标和替换来源）"))
+        add_map = QtWidgets.QPushButton("添加映射"); del_map = QtWidgets.QPushButton("删除映射"); maps.addWidget(add_map); maps.addWidget(del_map); maps.addStretch()
+        self.table = QtWidgets.QTableWidget(0, 4); self.table.setHorizontalHeaderLabels(["目标起始", "目标结束", "来源起始", "来源结束"]); self.table.setMaximumHeight(130)
+        root.addWidget(self.table)
+        split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.target_pane = PhaseHeatmapPane("目标相位（处理后直接更新）")
+        self.source_pane = PhaseHeatmapPane("替换来源相位（按时间拼接/重采样）")
+        self.shared_color_bar = pg.ColorBarItem(values=self.shared_levels(), colorMap=pg.colormap.get("turbo"))
+        self.shared_color_bar.setImageItem(
+            self.target_pane.image_item,
+            insert_in=self.target_pane.plot.getPlotItem(),
+        )
+        split.addWidget(self.target_pane); split.addWidget(self.source_pane); root.addWidget(split, 1)
+        self.status = QtWidgets.QLabel("左图点击任意点打开点位分析。来源比目标短时，只替换目标开头对应时间。")
+        root.addWidget(self.status)
+        add_source.clicked.connect(self.add_sources); choose_target_folder.clicked.connect(self.choose_target_folder); choose_source_folder.clicked.connect(self.choose_source_folder); add_map.clicked.connect(self.add_mapping); del_map.clicked.connect(self.delete_mapping)
+        filter_button.clicked.connect(self.apply_filter); replace_button.clicked.connect(self.apply_replacement); reset_button.clicked.connect(self.reset); export_button.clicked.connect(self.export)
+        batch_filter.clicked.connect(self.batch_filter_all_targets)
+        batch_replace.clicked.connect(self.batch_replace_all_targets)
+        self.target_list.itemSelectionChanged.connect(self.refresh_target); self.source_list.itemSelectionChanged.connect(self.refresh_source)
+        self.color_limit.valueChanged.connect(self.apply_shared_color_levels)
+        self.target_pane.plot.scene().sigMouseClicked.connect(self.open_point_analysis)
+
+    def selected_records(self) -> list[ProcessingTarget]:
+        return [self.records[item.data(QtCore.Qt.ItemDataRole.UserRole)] for item in self.target_list.selectedItems()]
+
+    def choose_target_folder(self) -> None:
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择目标数据文件夹", "")
+        if not folder:
+            return
+        self.records.clear(); self.target_list.clear()
+        self.status.setText("正在扫描目标文件头...")
+        QtWidgets.QApplication.processEvents()
+        errors: list[str] = []
+        paths = find_dat_files(Path(folder))
+        for index, path in enumerate(paths, start=1):
+            try:
+                header = read_header(path)
+                # Do not read the potentially multi-gigabyte payload here.
+                # It is loaded only when the user selects this target.
+                self.records.append(ProcessingTarget(path, header, None, None))
+                row = QtWidgets.QListWidgetItem(path.name); row.setData(QtCore.Qt.ItemDataRole.UserRole, len(self.records) - 1); self.target_list.addItem(row)
+            except Exception as exc: errors.append(f"{path.name}: {exc}")
+            if index % 25 == 0:
+                self.status.setText(f"正在扫描目标文件头: {index}/{len(paths)}")
+                QtWidgets.QApplication.processEvents()
+        self.status.setText(f"已扫描目标文件夹：{len(self.records)} 个文件；请选择一个或多个文件后显示/处理" + (f"；跳过 {len(errors)} 个无效文件" if errors else ""))
+
+    def choose_source_folder(self) -> None:
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择替换来源文件夹", "")
+        if not folder:
+            return
+        self.add_source_paths(find_dat_files(Path(folder)))
+
+    def target_data(self) -> tuple[np.ndarray, DatHeader, list[ProcessingTarget]]:
+        items = self.selected_records()
+        if not items: raise ValueError("请选择至少一个目标文件")
+        base = items[0].header
+        if any(item.header.protocol != base.protocol or item.header.point_count != base.point_count or item.header.frequency_hz != base.frequency_hz for item in items):
+            raise ValueError("选中的目标文件必须具有相同协议、通道数和采样率")
+        matrices: list[np.ndarray] = []
+        for item in items:
+            if item.original is None or item.working is None:
+                self.status.setText(f"正在读取目标数据: {item.path.name}")
+                QtWidgets.QApplication.processEvents()
+                matrix = read_signal_matrix(item.path, item.header).astype(np.float32, copy=False)
+                item.original = matrix.copy()
+                item.working = matrix.copy()
+            matrices.append(item.working)
+        matrix = np.concatenate(matrices, axis=1)
+        return matrix, replace(base, sample_count=matrix.shape[1], acquisition_time_s=matrix.shape[1] / base.frequency_hz), items
+
+    def source_data(self) -> tuple[np.ndarray, DatHeader]:
+        paths = [item.data(QtCore.Qt.ItemDataRole.UserRole) for item in self.source_list.selectedItems()]
+        if not paths: raise ValueError("请选择替换来源文件")
+        data = [self.sources[path] for path in paths]
+        target_rate = self.target_data()[1].frequency_hz
+        base = data[0][1]
+        target_header = self.target_data()[1]
+        if base.protocol != target_header.protocol: raise ValueError("替换来源协议必须与目标一致")
+        if any(header.protocol != base.protocol or header.point_count != base.point_count for _, header in data): raise ValueError("替换来源的协议和通道数必须一致")
+        matrix = np.concatenate([resample_matrix_to_rate(values, header.frequency_hz, target_rate) for values, header in data], axis=1)
+        return matrix, replace(base, frequency_hz=target_rate, sample_count=matrix.shape[1], acquisition_time_s=matrix.shape[1] / target_rate)
+
+    def refresh_target(self) -> None:
+        try:
+            matrix, header, _ = self.target_data(); maximum = header.point_count - 1
+            for spin in (self.start, self.end, self.reference): spin.setRange(0, maximum)
+            self.end.setValue(max(self.start.value(), min(self.end.value(), maximum))); self.minimum.setRange(0, header.frequency_hz / 2 - 1e-6); self.minimum.setValue(min(max(200, self.minimum.value()), self.minimum.maximum()))
+            self.target_pane.set_data(matrix, header, self.shared_levels())
+        except ValueError: pass
+
+    def refresh_source(self) -> None:
+        try:
+            matrix, header = self.source_data(); self.source_pane.set_data(matrix, header, self.shared_levels()); self.apply_shared_color_levels()
+        except ValueError: pass
+
+    def shared_levels(self) -> tuple[float, float]:
+        limit = float(self.color_limit.value())
+        return -limit, limit
+
+    def apply_shared_color_levels(self, _value: object = None) -> None:
+        levels = self.shared_levels()
+        self.target_pane.image_item.setLevels(levels)
+        self.source_pane.image_item.setLevels(levels)
+        self.shared_color_bar.setLevels(levels)
+
+    def add_sources(self) -> None:
+        names, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "选择替换文件", "", "Data files (*.dat *.tdms);;All files (*.*)")
+        self.add_source_paths([Path(name) for name in names])
+
+    def add_source_paths(self, paths: list[Path]) -> None:
+        target_protocol = self.selected_records()[0].header.protocol if self.selected_records() else None
+        for path in paths:
+            try:
+                header = read_header(path)
+                if target_protocol is not None and header.protocol != target_protocol: raise ValueError("协议必须与目标一致")
+                self.sources[path] = (read_signal_matrix(path, header), header)
+                item = QtWidgets.QListWidgetItem(path.name); item.setData(QtCore.Qt.ItemDataRole.UserRole, path); self.source_list.addItem(item)
+            except Exception as exc: self.status.setText(f"无法添加 {path.name}: {exc}")
+
+    def add_mapping(self) -> None:
+        try: maximum = self.target_data()[1].point_count - 1
+        except ValueError: return
+        row = self.table.rowCount(); self.table.insertRow(row)
+        for column, value in enumerate((0, maximum, 0, maximum)):
+            spin = QtWidgets.QSpinBox(); spin.setRange(0, maximum); spin.setValue(value); self.table.setCellWidget(row, column, spin)
+
+    def mappings(self) -> list[tuple[int, int, int, int]]:
+        values = []
+        for row in range(self.table.rowCount()): values.append(tuple(int(self.table.cellWidget(row, col).value()) for col in range(4)))
+        return values
+
+    def delete_mapping(self) -> None:
+        for row in sorted({item.row() for item in self.table.selectedItems()}, reverse=True): self.table.removeRow(row)
+
+    def apply_filter(self) -> None:
+        try:
+            matrix, header, records = self.target_data(); result, detected = flatten_spectral_channels(
+                matrix,
+                header.frequency_hz,
+                self.start.value(),
+                self.end.value(),
+                SpectralFlatteningSettings(self.minimum.value(), self.threshold.value(), self.q.value()),
+                reference_channel=self.reference.value(),
+            )
+            offset = 0
+            for record in records:
+                count = record.header.sample_count; record.working = result[:, offset:offset + count]; offset += count
+            common_count = next(iter(detected.values()), np.array([], dtype=float)).size
+            self.refresh_target(); self.status.setText(f"滤波已完成：以参考通道 {self.reference.value()} 检测到 {common_count} 个频率，并复用于全部选中通道。")
+        except Exception as exc: QtWidgets.QMessageBox.critical(self, "滤波失败", str(exc))
+
+    def apply_replacement(self) -> None:
+        try:
+            target, header, records = self.target_data(); source, _ = self.source_data()
+            if source.shape[1] > target.shape[1]: raise ValueError("替换来源总时长不能超过目标；请减少来源文件")
+            for ts, te, ss, se in self.mappings():
+                if not (0 <= ts <= te < target.shape[0] and 0 <= ss <= se < source.shape[0] and te-ts == se-ss): raise ValueError("通道映射无效或两侧通道数不同")
+                target[ts:te+1, :source.shape[1]] = source[ss:se+1]
+            offset = 0
+            for record in records:
+                count = record.header.sample_count; record.working = target[:, offset:offset + count]; offset += count
+            self.refresh_target(); self.status.setText(f"替换已完成：覆盖目标前 {source.shape[1] / header.frequency_hz:.3f} s。")
+        except Exception as exc: QtWidgets.QMessageBox.critical(self, "替换失败", str(exc))
+
+    def batch_filter_all_targets(self) -> None:
+        """Detect once from the current reference trace, then stream files one by one."""
+        if not self.records:
+            QtWidgets.QMessageBox.information(self, "批量滤波", "请先选择目标文件夹")
+            return
+        try:
+            current, current_header, _ = self.target_data()
+            settings = SpectralFlatteningSettings(self.minimum.value(), self.threshold.value(), self.q.value())
+            peaks = detect_interference_frequencies(current[self.reference.value()], current_header.frequency_hz, settings)
+            if peaks.size == 0:
+                QtWidgets.QMessageBox.information(self, "批量滤波", "参考通道未检测到满足阈值的干扰峰，未开始导出。")
+                return
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "批量滤波", f"无法生成公共陷波器: {exc}")
+            return
+        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "选择批量滤波导出目录", "")
+        if not directory:
+            return
+
+        output_dir = Path(directory)
+        total = len(self.records)
+        completed = 0
+        failures: list[str] = []
+        self.batch_progress.setRange(0, total)
+        self.batch_progress.setValue(0)
+        try:
+            for index, record in enumerate(self.records, start=1):
+                self.status.setText(f"正在批量滤波 {index}/{total}: {record.path.name}")
+                self.batch_progress.setFormat(f"正在滤波 {index}/{total}: {record.path.name}")
+                QtWidgets.QApplication.processEvents()
+                matrix: np.ndarray | None = None
+                try:
+                    if record.header.point_count <= self.end.value() or record.header.frequency_hz / 2.0 <= float(np.max(peaks)):
+                        raise ValueError("通道范围或 Nyquist 频率不兼容")
+                    matrix = read_signal_matrix(record.path, record.header).astype(np.float32, copy=False)
+                    for channel in range(self.start.value(), self.end.value() + 1):
+                        matrix[channel] = apply_notch_frequencies(matrix[channel], record.header.frequency_hz, peaks, settings.q_factor)
+                    output = output_dir / f"{record.path.stem}_filtered{record.path.suffix}"
+                    export_processed_signal(record.path, record.header, matrix, output)
+                    completed += 1
+                except Exception as exc:
+                    failures.append(f"{record.path.name}: {exc}")
+                finally:
+                    # Do not retain a completed file's matrix; this is what
+                    # keeps a large folder from accumulating RAM usage.
+                    del matrix
+                    gc.collect()
+                self.batch_progress.setValue(index)
+                QtWidgets.QApplication.processEvents()
+        finally:
+            self.batch_progress.setFormat(f"批量滤波完成：成功 {completed}/{total}" + (f"，失败 {len(failures)}" if failures else ""))
+        self.status.setText(self.batch_progress.format())
+        if failures:
+            QtWidgets.QMessageBox.warning(self, "批量滤波完成", "部分文件未处理：\n" + "\n".join(failures[:8]))
+
+    def batch_replace_all_targets(self) -> None:
+        """Stream one target/source pair at a time; source paths cycle as needed."""
+        if not self.records:
+            QtWidgets.QMessageBox.information(self, "批量替换", "请先选择目标文件夹")
+            return
+        try:
+            mappings = self.mappings()
+            if not mappings:
+                raise ValueError("请先添加至少一条通道映射")
+            selected = [item.data(QtCore.Qt.ItemDataRole.UserRole) for item in self.source_list.selectedItems()]
+            source_paths = selected or list(self.sources)
+            if not source_paths:
+                raise ValueError("请先选择至少一个替换来源文件")
+        except Exception as exc:
+            QtWidgets.QMessageBox.information(self, "批量替换", str(exc))
+            return
+        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "选择批量替换导出目录", "")
+        if not directory:
+            return
+
+        total = len(self.records)
+        completed = 0
+        failures: list[str] = []
+        self.batch_progress.setRange(0, total)
+        self.batch_progress.setValue(0)
+        try:
+            for index, target_record in enumerate(self.records, start=1):
+                source_path = source_paths[(index - 1) % len(source_paths)]
+                self.status.setText(f"正在批量替换 {index}/{total}: {target_record.path.name} ← {source_path.name}")
+                self.batch_progress.setFormat(f"正在替换 {index}/{total}: {target_record.path.name}")
+                QtWidgets.QApplication.processEvents()
+                target_matrix: np.ndarray | None = None
+                source_matrix: np.ndarray | None = None
+                try:
+                    source_header = self.sources[source_path][1]
+                    if source_header.protocol != target_record.header.protocol:
+                        raise ValueError("目标与替换来源协议不一致")
+                    target_matrix = read_signal_matrix(target_record.path, target_record.header).astype(np.float32, copy=False)
+                    # Read the source fresh for this pair so completed pairs do
+                    # not cause memory use to increase with target count.
+                    source_matrix = read_signal_matrix(source_path, source_header).astype(np.float32, copy=False)
+                    source_matrix = resample_matrix_to_rate(source_matrix, source_header.frequency_hz, target_record.header.frequency_hz)
+                    replace_samples = min(target_matrix.shape[1], source_matrix.shape[1])
+                    if replace_samples < 1:
+                        raise ValueError("替换来源没有可用采样点")
+                    for target_start, target_end, source_start, source_end in mappings:
+                        if not (
+                            0 <= target_start <= target_end < target_matrix.shape[0]
+                            and 0 <= source_start <= source_end < source_matrix.shape[0]
+                            and target_end - target_start == source_end - source_start
+                        ):
+                            raise ValueError("通道映射超出目标或来源范围，或两侧通道数不同")
+                        target_matrix[target_start : target_end + 1, :replace_samples] = source_matrix[source_start : source_end + 1, :replace_samples]
+                    output = Path(directory) / f"{target_record.path.stem}_replaced{target_record.path.suffix}"
+                    export_processed_signal(target_record.path, target_record.header, target_matrix, output)
+                    completed += 1
+                except Exception as exc:
+                    failures.append(f"{target_record.path.name}: {exc}")
+                finally:
+                    del target_matrix
+                    del source_matrix
+                    gc.collect()
+                self.batch_progress.setValue(index)
+                QtWidgets.QApplication.processEvents()
+        finally:
+            self.batch_progress.setFormat(f"批量替换完成：成功 {completed}/{total}" + (f"，失败 {len(failures)}" if failures else ""))
+        self.status.setText(self.batch_progress.format())
+        if failures:
+            QtWidgets.QMessageBox.warning(self, "批量替换完成", "部分文件未处理：\n" + "\n".join(failures[:8]))
+
+    def reset(self) -> None:
+        _, _, records = self.target_data()
+        for record in records:
+            if record.original is not None:
+                record.working = record.original.copy()
+        self.refresh_target(); self.status.setText("所选目标已恢复原始数据。")
+
+    def open_point_analysis(self, point: object) -> None:
+        try:
+            if isinstance(point, QtCore.QPointF):
+                data_point = point
+            elif hasattr(point, "scenePos"):
+                data_point = self.target_pane.plot.getViewBox().mapSceneToView(point.scenePos())
+            else:
+                return
+            matrix, header, _ = self.target_data(); index = int(round((data_point.x() - header.position_start_m) / max(header.point_interval_m, 1e-12)))
+            if 0 <= index < header.point_count and 0 <= data_point.y() <= header.time_span_s:
+                window = PointAnalysisWindow(matrix, header, index); self.point_windows.append(window); window.show()
+                self.status.setText(f"已打开点位分析：通道 {index}")
+        except Exception as exc:
+            self.status.setText(f"无法打开点位分析: {exc}")
+
+    def export(self) -> None:
+        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "选择导出目录", "")
+        if not directory: return
+        try:
+            _, _, records = self.target_data()
+            for record in records:
+                if record.working is None:
+                    raise ValueError(f"目标数据尚未加载: {record.path.name}")
+                export_processed_signal(record.path, record.header, record.working, Path(directory) / f"{record.path.stem}_processed{record.path.suffix}")
+            self.status.setText("已导出所选目标文件。")
+        except Exception as exc: QtWidgets.QMessageBox.critical(self, "导出失败", str(exc))
+
+
 class DatViewer(QtWidgets.QMainWindow):
     def __init__(self, start_path: Path | None = None) -> None:
         super().__init__()
         self.setWindowTitle("CDAS/TDAS DAT Viewer - PyQtGraph")
         self.resize(1400, 860)
 
-        self.files: list[Path] = []
         self.headers: dict[Path, DatHeader] = {}
         self.current_path: Path | None = None
         self.current_paths: list[Path] = []
+        self.current_source_header: DatHeader | None = None
         self.current_header: DatHeader | None = None
         self.current_raw_matrix: np.ndarray | None = None
         self.current_matrix: np.ndarray | None = None
@@ -3251,10 +4751,14 @@ class DatViewer(QtWidgets.QMainWindow):
         self.silixa_normalized = True
         self.silixa_normalization_scale: float | None = None
         self.normalization_btn: QtWidgets.QPushButton | None = None
+        self.time_difference_enabled = False
+        self.time_difference_checkbox: QtWidgets.QCheckBox | None = None
         self.analysis_windows: list[QtWidgets.QMainWindow] = []
         self.spectrum_3d_window: Spectrum3DWindow | None = None
         self.spectrum_3d_compare_windows: list[Spectrum3DWindow] = []
         self.spatial_psd_window: SpatialPsdComparisonWindow | None = None
+        self.report_workspace: QtWidgets.QMainWindow | None = None
+        self.processing_workspace: ProcessingWorkspaceWindow | None = None
 
         self._build_ui()
         if start_path is not None:
@@ -3284,11 +4788,18 @@ class DatViewer(QtWidgets.QMainWindow):
         spectrum_btn = QtWidgets.QPushButton("频谱热力图")
         band_energy_btn = QtWidgets.QPushButton("频段能量热力图")
         spatial_psd_btn = QtWidgets.QPushButton("空间段PSD对比")
+        report_btn = QtWidgets.QPushButton("DAS实验报告工作台")
+        processing_btn = QtWidgets.QPushButton("数据处理")
         spectrum_3d_btn = QtWidgets.QPushButton("3D频谱图")
         new_spectrum_3d_btn = QtWidgets.QPushButton("新建3D频谱图")
         self.normalization_btn = QtWidgets.QPushButton("显示原始数据")
         self.normalization_btn.setToolTip("Silixa TDMS 默认按最大绝对值归一化到 3.14；点击可切换原始计数/归一化")
         self.normalization_btn.setEnabled(False)
+        self.time_difference_checkbox = QtWidgets.QCheckBox("时域一阶差分")
+        self.time_difference_checkbox.setToolTip(
+            "仅 CDAS 数据可用。对拼接后的每个点位计算 x[t] - x[t-1]，采样数减少 1。"
+        )
+        self.time_difference_checkbox.setEnabled(False)
         self.color_limit = QtWidgets.QDoubleSpinBox()
         self.color_limit.setRange(0.01, 100.0)
         self.color_limit.setDecimals(2)
@@ -3314,9 +4825,12 @@ class DatViewer(QtWidgets.QMainWindow):
         toolbar.addWidget(reload_btn)
         toolbar.addWidget(show_selected_btn)
         toolbar.addWidget(self.normalization_btn)
+        toolbar.addWidget(self.time_difference_checkbox)
         toolbar.addWidget(spectrum_btn)
         toolbar.addWidget(band_energy_btn)
         toolbar.addWidget(spatial_psd_btn)
+        toolbar.addWidget(report_btn)
+        toolbar.addWidget(processing_btn)
         toolbar.addWidget(spectrum_3d_btn)
         toolbar.addWidget(new_spectrum_3d_btn)
         toolbar.addWidget(QtWidgets.QLabel("色条范围±"))
@@ -3341,9 +4855,12 @@ class DatViewer(QtWidgets.QMainWindow):
         reload_btn.clicked.connect(self.reload_current_path)
         show_selected_btn.clicked.connect(self.show_selected_files)
         self.normalization_btn.clicked.connect(self.toggle_silixa_normalization)
+        self.time_difference_checkbox.toggled.connect(self.toggle_time_difference)
         spectrum_btn.clicked.connect(self.show_spectrum_heatmap)
         band_energy_btn.clicked.connect(self.show_band_energy_heatmap)
         spatial_psd_btn.clicked.connect(self.show_spatial_psd_comparison)
+        report_btn.clicked.connect(self.show_report_workspace)
+        processing_btn.clicked.connect(self.show_processing_workspace)
         spectrum_3d_btn.clicked.connect(self.show_spectrum_3d)
         new_spectrum_3d_btn.clicked.connect(self.show_new_spectrum_3d)
         self.color_limit.valueChanged.connect(self.update_levels_only)
@@ -3360,10 +4877,24 @@ class DatViewer(QtWidgets.QMainWindow):
 
         left_panel = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left_panel)
-        self.file_list = QtWidgets.QListWidget()
-        self.file_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-        left_layout.addWidget(QtWidgets.QLabel("文件名"))
-        left_layout.addWidget(self.file_list)
+        self.file_model = QtGui.QFileSystemModel(self)
+        self.file_model.setFilter(
+            QtCore.QDir.Filter.AllDirs
+            | QtCore.QDir.Filter.Files
+            | QtCore.QDir.Filter.NoDotAndDotDot
+        )
+        self.file_model.setNameFilters(["*.dat", "*.DAT", "*.tdms", "*.TDMS"])
+        self.file_model.setNameFilterDisables(False)
+        self.file_tree = QtWidgets.QTreeView()
+        self.file_tree.setModel(self.file_model)
+        self.file_tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.file_tree.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.file_tree.setSortingEnabled(True)
+        self.file_tree.sortByColumn(0, QtCore.Qt.SortOrder.AscendingOrder)
+        for column in range(1, self.file_model.columnCount()):
+            self.file_tree.hideColumn(column)
+        left_layout.addWidget(QtWidgets.QLabel("数据文件（可展开子文件夹，可多选）"))
+        left_layout.addWidget(self.file_tree)
         splitter.addWidget(left_panel)
 
         right_panel = QtWidgets.QWidget()
@@ -3407,14 +4938,19 @@ class DatViewer(QtWidgets.QMainWindow):
         self.status = QtWidgets.QLabel("Ready")
         root.addWidget(self.status)
 
-        self.file_list.currentRowChanged.connect(self.on_file_selected)
+        self.file_tree.selectionModel().currentChanged.connect(self.on_file_selected)
         self.plot.scene().sigMouseClicked.connect(self.on_plot_clicked)
         self.plot.vb.sigRangeChanged.connect(self.on_view_range_changed)
 
     def is_silixa_current(self) -> bool:
         return self.current_header is not None and self.current_header.protocol == "Silixa TDMS"
 
+    def is_cdas_current(self) -> bool:
+        return self.current_source_header is not None and self.current_source_header.protocol == "CDAS"
+
     def current_value_mode_note(self) -> str | None:
+        if self.is_cdas_current() and self.time_difference_enabled:
+            return "当前值模式: CDAS 时域一阶差分 x[t] - x[t-1]"
         if not self.is_silixa_current():
             return None
         if self.silixa_normalized:
@@ -3437,18 +4973,51 @@ class DatViewer(QtWidgets.QMainWindow):
             return
         self.normalization_btn.setText("显示原始数据" if self.silixa_normalized else "恢复归一化")
 
+    def update_time_difference_control(self) -> None:
+        if self.time_difference_checkbox is None:
+            return
+        enabled = (
+            self.is_cdas_current()
+            and self.current_raw_matrix is not None
+            and self.current_raw_matrix.shape[1] >= 2
+        )
+        if not enabled:
+            self.time_difference_enabled = False
+            self.time_difference_checkbox.blockSignals(True)
+            self.time_difference_checkbox.setChecked(False)
+            self.time_difference_checkbox.blockSignals(False)
+        self.time_difference_checkbox.setEnabled(enabled)
+
     def apply_current_value_mode(self) -> None:
-        if self.current_raw_matrix is None:
+        if self.current_raw_matrix is None or self.current_source_header is None:
             self.current_matrix = None
+            self.current_header = None
             self.silixa_normalization_scale = None
             self.update_normalization_button()
+            self.update_time_difference_control()
             return
+
+        self.update_time_difference_control()
+        header = self.current_source_header
+        matrix = self.current_raw_matrix
+        if header.protocol == "CDAS" and self.time_difference_enabled:
+            if matrix.shape[1] < 2:
+                raise ValueError("时域一阶差分至少需要 2 个采样点")
+            matrix = np.diff(matrix, axis=1)
+            header = replace(
+                header,
+                sample_count=int(matrix.shape[1]),
+                acquisition_time_s=float(matrix.shape[1]) / max(1, header.frequency_hz),
+            )
+
+        self.current_header = header
         if self.is_silixa_current() and self.silixa_normalized:
-            self.current_matrix, self.silixa_normalization_scale = normalize_silixa_matrix(self.current_raw_matrix)
+            self.current_matrix, self.silixa_normalization_scale = normalize_silixa_matrix(matrix)
         else:
-            self.current_matrix = self.current_raw_matrix
+            self.current_matrix = matrix
             self.silixa_normalization_scale = None
         self.update_normalization_button()
+        self.update_time_difference_control()
 
     def refresh_current_heatmap(self, reset_view: bool = False) -> None:
         if self.current_header is None or self.current_matrix is None:
@@ -3477,6 +5046,16 @@ class DatViewer(QtWidgets.QMainWindow):
         self.update_spatial_psd_source()
         mode_text = "归一化" if self.silixa_normalized else "原始计数"
         self.status.setText(f"已切换 Silixa TDMS 显示/分析模式: {mode_text}")
+
+    def toggle_time_difference(self, checked: bool) -> None:
+        if not self.is_cdas_current() or self.current_raw_matrix is None:
+            return
+        self.time_difference_enabled = bool(checked)
+        self.apply_current_value_mode()
+        self.refresh_current_heatmap(reset_view=True)
+        self.update_spatial_psd_source()
+        mode_text = "已启用" if self.time_difference_enabled else "已关闭"
+        self.status.setText(f"CDAS 时域一阶差分{mode_text}；后续新打开的分析窗口将使用当前数据")
 
     def choose_folder(self) -> None:
         selected = QtWidgets.QFileDialog.getExistingDirectory(self, "选择数据文件夹", self.dialog_start_path())
@@ -3507,39 +5086,71 @@ class DatViewer(QtWidgets.QMainWindow):
         self.load_path(Path(text))
 
     def load_path(self, path: Path) -> None:
-        self.path_edit.setText(str(path))
-        self.status.setText("正在扫描数据文件...")
-        QtWidgets.QApplication.processEvents()
-
-        self.files = find_dat_files(path)
-        self.headers = {}
-        self.file_list.clear()
-        for file_path in self.files:
-            try:
-                self.headers[file_path] = read_header(file_path)
-                self.file_list.addItem(file_path.name)
-            except Exception as exc:
-                self.file_list.addItem(f"{file_path.name} - {exc}")
-
-        self.status.setText(f"找到 {len(self.files)} 个数据文件")
-        if self.files:
-            self.file_list.setCurrentRow(0)
-
-    def on_file_selected(self, row: int) -> None:
-        if row < 0 or row >= len(self.files):
+        path = path.expanduser()
+        if path.is_file():
+            root_path = path.parent
+            selected_file: Path | None = path
+        elif path.is_dir():
+            root_path = path
+            selected_file = None
+        else:
+            self.status.setText(f"路径不存在: {path}")
             return
-        path = self.files[row]
+
+        self.path_edit.setText(str(path))
+        self.headers = {}
+        root_index = self.file_model.setRootPath(str(root_path))
+        self.file_tree.setRootIndex(root_index)
+        self.file_tree.expand(root_index)
+        self.status.setText(f"已打开文件树：{root_path}；展开子文件夹后选择 .dat 或 .tdms 文件")
+        if selected_file is not None:
+            QtCore.QTimer.singleShot(0, lambda selected=selected_file: self.select_tree_file(selected))
+
+    def select_tree_file(self, path: Path) -> None:
+        index = self.file_model.index(str(path))
+        if not index.isValid():
+            return
+        parent = index.parent()
+        while parent.isValid():
+            self.file_tree.expand(parent)
+            parent = parent.parent()
+        self.file_tree.setCurrentIndex(index)
+        self.file_tree.scrollTo(index)
+
+    def data_path_from_tree_index(self, index: QtCore.QModelIndex) -> Path | None:
+        if not index.isValid() or self.file_model.isDir(index):
+            return None
+        path = Path(self.file_model.filePath(index))
+        if path.suffix.lower() not in {".dat", ".tdms"}:
+            return None
+        return path
+
+    def selected_tree_data_paths(self) -> list[Path]:
+        indexes = self.file_tree.selectionModel().selectedRows(0)
+        paths = {path for index in indexes if (path := self.data_path_from_tree_index(index)) is not None}
+        if not paths:
+            current = self.data_path_from_tree_index(self.file_tree.currentIndex())
+            if current is not None:
+                paths.add(current)
+        return sorted(paths, key=lambda path: str(path).lower())
+
+    def ensure_headers(self, paths: list[Path]) -> None:
+        for path in paths:
+            if path not in self.headers:
+                self.headers[path] = read_header(path)
+
+    def on_file_selected(self, current: QtCore.QModelIndex, _previous: QtCore.QModelIndex) -> None:
+        path = self.data_path_from_tree_index(current)
+        if path is None:
+            return
         self.display_paths([path])
 
     def show_selected_files(self) -> None:
-        rows = sorted(index.row() for index in self.file_list.selectedIndexes())
-        paths = [self.files[row] for row in rows if 0 <= row < len(self.files)]
-        if not paths:
-            row = self.file_list.currentRow()
-            if 0 <= row < len(self.files):
-                paths = [self.files[row]]
+        paths = self.selected_tree_data_paths()
         if paths:
             self.display_paths(paths)
+        else:
+            self.status.setText("请选择一个或多个 .dat/.tdms 数据文件")
 
     def validate_multi_headers(self, paths: list[Path]) -> DatHeader:
         base = self.headers.get(paths[0])
@@ -3596,8 +5207,9 @@ class DatViewer(QtWidgets.QMainWindow):
     def display_paths(self, paths: list[Path]) -> None:
         if not paths:
             return
-        paths = sorted(paths, key=lambda p: self.files.index(p) if p in self.files else str(p))
         try:
+            self.ensure_headers(paths)
+            paths = sorted(paths, key=lambda path: str(path).lower())
             header = self.validate_multi_headers(paths)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "无法显示多文件", str(exc))
@@ -3626,7 +5238,7 @@ class DatViewer(QtWidgets.QMainWindow):
 
         self.current_path = first_path
         self.current_paths = paths
-        self.current_header = header
+        self.current_source_header = header
         self.current_raw_matrix = matrix
         self.silixa_normalized = header.protocol == "Silixa TDMS"
         self.apply_current_value_mode()
@@ -3634,7 +5246,7 @@ class DatViewer(QtWidgets.QMainWindow):
         self.info.setPlainText(
             format_display_info(
                 paths,
-                header,
+                self.current_header or header,
                 self.current_matrix,
                 self.color_limit.value(),
                 self.current_display_matrix,
@@ -3645,7 +5257,8 @@ class DatViewer(QtWidgets.QMainWindow):
         if len(paths) == 1:
             self.status.setText(f"已显示 {first_path.name}")
         else:
-            self.status.setText(f"已拼接显示 {len(paths)} 个文件，总时长 {header.time_span_s:.3f} s")
+            display_header = self.current_header or header
+            self.status.setText(f"已拼接显示 {len(paths)} 个文件，总时长 {display_header.time_span_s:.3f} s")
 
     def set_range_controls(self, x0: float, x1: float, y0: float, y1: float) -> None:
         for spin, value in (
@@ -3817,6 +5430,43 @@ class DatViewer(QtWidgets.QMainWindow):
         self.spatial_psd_window.activateWindow()
         self.status.setText("已打开空间段 PSD 曲线对比窗口")
 
+    def show_report_workspace(self) -> None:
+        """Open the persisted, time-window based batch-report workflow.
+
+        The import is intentionally lazy: ``das_report`` reuses this module's
+        pure readers and PSD routine, so importing it during module startup
+        would create a circular import.
+        """
+        if self.report_workspace is None:
+            from das_report import ReportWorkspaceWindow
+
+            self.report_workspace = ReportWorkspaceWindow()
+            self.analysis_windows.append(self.report_workspace)
+            self.report_workspace.destroyed.connect(lambda _obj=None: setattr(self, "report_workspace", None))
+        self.report_workspace.show()
+        self.report_workspace.raise_()
+        self.report_workspace.activateWindow()
+        self.status.setText("已打开 DAS 实验报告工作台")
+
+    def show_processing_workspace(self) -> None:
+        """Open a non-destructive processor for one or more selected targets."""
+        targets: list[tuple[Path, DatHeader, np.ndarray]] = []
+        if self.current_paths:
+            try:
+                targets = [(path, self.headers[path], read_signal_matrix(path, self.headers[path])) for path in self.current_paths]
+            except Exception as exc:
+                QtWidgets.QMessageBox.critical(self, "数据处理", f"无法读取目标文件: {exc}")
+                return
+        window = SimpleProcessingWorkspaceWindow(targets)
+        window.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.processing_workspace = window
+        self.analysis_windows.append(window)
+        window.destroyed.connect(lambda _obj=None: setattr(self, "processing_workspace", None))
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        self.status.setText("已打开数据处理工作台")
+
     def show_spectrum_3d(self) -> None:
         if self.current_header is None or self.current_matrix is None:
             QtWidgets.QMessageBox.information(self, "提示", "请先显示一个或多个数据文件")
@@ -3927,6 +5577,17 @@ def main() -> int:
         True,
     )
     app = QtWidgets.QApplication(sys.argv)
+    if "--smoke-test" in sys.argv:
+        # Exercise the shipped Qt DLLs, platform plugin, and report imports
+        # through the actual executable before publishing a portable build.
+        from das_report import ReportWorkspaceWindow
+
+        viewer = DatViewer(None)
+        report = ReportWorkspaceWindow()
+        viewer.show()
+        report.show()
+        QtCore.QTimer.singleShot(1000, app.quit)
+        return app.exec()
     start_path = Path(sys.argv[1]) if len(sys.argv) > 1 else None
     viewer = DatViewer(start_path)
     viewer.showMaximized()

@@ -1,5 +1,7 @@
 numpy
+scipy
 pyqtgraph
 PyQt6
 PyOpenGL
 pyinstaller
+python-pptx

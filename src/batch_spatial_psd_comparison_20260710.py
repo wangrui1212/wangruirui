@@ -114,6 +114,10 @@ OVERLAP_PERCENT = 50.0
 WINDOW_NAME = "Hann"
 
 
+def frequency_range_label() -> str:
+    return f"0-{FREQ_MAX_HZ:g} Hz"
+
+
 @dataclass
 class CurveRow:
     experiment_type: str
@@ -376,7 +380,7 @@ def plot_group(curves: list[CurveData], output_path: Path, title: str, subtitle:
         draw.text((legend_x + 42, y), legend_text, font=legend_font, fill="#111111")
 
     draw.text((70, canvas_h - 78), "PSD算法: tdas_dat_viewer.compute_spatial_segment_psd；空间平均 mean_psd；Hann窗2s，50%重叠；单位 dB re 1 rad²/Hz。", font=small_font, fill="#555555")
-    draw.text((70, canvas_h - 46), "取样: 稳定曲线取各组稳定阶段中心1分钟；底噪曲线取该大类第一组底噪阶段中心1分钟；频率显示0-500Hz。", font=small_font, fill="#555555")
+    draw.text((70, canvas_h - 46), f"取样: 稳定曲线取各组稳定阶段中心1分钟；底噪曲线取该大类第一组底噪阶段中心1分钟；频率显示{frequency_range_label()}。", font=small_font, fill="#555555")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path)
 
@@ -391,14 +395,24 @@ def write_summary_csv(path: Path, rows: list[CurveRow]) -> None:
 
 
 def main() -> int:
+    global FREQ_MAX_HZ
     parser = argparse.ArgumentParser(description="空间段PSD稳定阶段中间1分钟对比")
     parser.add_argument("--workbook", type=Path, default=DEFAULT_WORKBOOK)
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--freq-max-hz", type=float, default=FREQ_MAX_HZ, help="PSD谱线频率显示和CSV导出上限。")
+    parser.add_argument(
+        "--experiment-type",
+        action="append",
+        choices=EXPERIMENT_TYPES,
+        help="只处理指定实验大类；可重复传入。不传则处理全部实验大类。",
+    )
     args = parser.parse_args()
+    FREQ_MAX_HZ = float(args.freq_max_hz)
+    experiment_types = tuple(args.experiment_type) if args.experiment_type else EXPERIMENT_TYPES
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    records = [record for record in read_records(args.workbook) if record.group in EXPERIMENT_TYPES]
+    records = [record for record in read_records(args.workbook) if record.group in experiment_types]
     files_by_device = {
         device.title: index_data_files(args.data_root / device.data_subdir)
         for device in DEVICE_CONFIGS
@@ -463,7 +477,7 @@ def main() -> int:
                     )
                     print(f"failed {record.group} {record.seq} {device.title} {segment_name}: {exc}", flush=True)
 
-    for experiment_type in EXPERIMENT_TYPES:
+    for experiment_type in experiment_types:
         noise_record = next(
             (record for record in records if record.group == experiment_type and phase_interval(record, "底噪") is not None),
             None,
@@ -512,7 +526,7 @@ def main() -> int:
                     print(f"failed {experiment_type} {noise_record.seq} {device.title} {segment_name} 底噪: {exc}", flush=True)
 
     figures: list[dict[str, str]] = []
-    for experiment_type in EXPERIMENT_TYPES:
+    for experiment_type in experiment_types:
         for device in DEVICE_CONFIGS:
             for segment_name, start_m, end_m in SPATIAL_SEGMENTS[device.title]:
                 group_curves = [
@@ -531,7 +545,7 @@ def main() -> int:
                     / f"{safe_filename(experiment_type)}_{safe_filename(device.title)}_{safe_filename(segment_name)}_{start_m:g}-{end_m:g}m_稳定中间1分钟_含底噪_PSD对比.png"
                 )
                 title = f"{experiment_type} | {device.title} | {segment_name} {start_m:g}-{end_m:g} m"
-                subtitle = f"稳定阶段中心1分钟 + 底噪中心1分钟 | 空间平均PSD | 0-500 Hz | {len(group_curves)} 条曲线"
+                subtitle = f"稳定阶段中心1分钟 + 底噪中心1分钟 | 空间平均PSD | {frequency_range_label()} | {len(group_curves)} 条曲线"
                 plot_group(group_curves, output_path, title, subtitle)
                 figures.append(
                     {

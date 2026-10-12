@@ -287,6 +287,18 @@ def read_records(workbook_path: Path) -> list[ExperimentRecord]:
 def apply_user_confirmed_times(records: list[ExperimentRecord]) -> list[ExperimentRecord]:
     corrected: list[ExperimentRecord] = []
     for record in records:
+        if record.seq == "3" and int(record.flow_lh) == 150:
+            corrected.append(
+                ExperimentRecord(
+                    **{
+                        **record.__dict__,
+                        "middle_text": "15:56",
+                        "end": datetime.combine(record.start.date(), time(16, 1)),
+                        "end_text": "15:56-16:01",
+                    }
+                )
+            )
+            continue
         if record.group == "第一组实验" and record.seq == "1" and int(record.flow_lh) == 260:
             corrected.append(
                 ExperimentRecord(
@@ -306,7 +318,7 @@ def apply_user_confirmed_times(records: list[ExperimentRecord]) -> list[Experime
                     **{
                         **record.__dict__,
                         "start": datetime.combine(record.start.date(), time(17, 5)),
-                        "middle_text": "17:10",
+                        "middle_text": "17:15",
                         "end": datetime.combine(record.start.date(), time(17, 20)),
                         "end_text": "17:15-17:20",
                     }

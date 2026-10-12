@@ -19,7 +19,17 @@ import pyqtgraph as pg
 from PyQt6 import QtCore, QtWidgets
 from PyQt6 import QtGui
 
-from tdas_dat_viewer import DatHeader, PointAnalysisWindow, read_header, read_signal_matrix
+from tdas_dat_viewer import (
+    DEFAULT_PHOTOELASTIC_COEFFICIENT,
+    DEFAULT_REFRACTIVE_INDEX,
+    DEFAULT_WAVELENGTH_NM,
+    DatHeader,
+    FFT_WINDOW_OPTIONS,
+    PointAnalysisWindow,
+    SPECTRUM_MODE_OPTIONS,
+    read_header,
+    read_signal_matrix,
+)
 
 
 def expand_inputs(inputs: list[str]) -> list[Path]:
@@ -132,9 +142,38 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--exclude-band-hz", type=float, default=5.0, help="全局底噪排除信号频率总宽，默认 5 Hz。")
     parser.add_argument(
         "--spectrum-mode",
-        choices=["fft", "psd"],
-        default="fft",
-        help="频谱显示模式：fft 为 FFT幅值谱(dB)，psd 为 PSD功率谱密度(dB re 1 rad^2/Hz)。默认 fft。",
+        choices=["fft", *(key for _, key in SPECTRUM_MODE_OPTIONS)],
+        default="magnitude-peak",
+        help=(
+            "频谱显示模式：magnitude-peak、magnitude-rms、power、psd 或 asd。"
+            "旧参数 fft 仍等价于 magnitude-peak。默认 magnitude-peak。"
+        ),
+    )
+    parser.add_argument(
+        "--window",
+        choices=["rectangular", "hann", "hamming", "blackman", "blackman-harris", "flat-top"],
+        default="hann",
+        help="FFT窗函数，默认 hann。",
+    )
+    parser.add_argument(
+        "--unit",
+        choices=["rad", "picostrain", "microstrain"],
+        default="rad",
+        help="显示单位，picostrain 为 pε；默认 rad。",
+    )
+    parser.add_argument("--wavelength-nm", type=float, default=DEFAULT_WAVELENGTH_NM, help="工作波长，默认 1550 nm。")
+    parser.add_argument("--refractive-index", type=float, default=DEFAULT_REFRACTIVE_INDEX, help="有效折射率，默认 1.4862。")
+    parser.add_argument(
+        "--photoelastic-coefficient",
+        type=float,
+        default=DEFAULT_PHOTOELASTIC_COEFFICIENT,
+        help="光弹性系数，默认 0.78。",
+    )
+    parser.add_argument(
+        "--gauge-length-m",
+        type=float,
+        default=None,
+        help="手动覆盖头部标距（m）；省略时自动读取 GaugeLength/标距，缺失则使用 10 m。",
     )
     return parser.parse_args(argv)
 
@@ -169,7 +208,30 @@ def main(argv: list[str] | None = None) -> int:
     window = PointAnalysisWindow(matrix, header, point_index)
     window.snr_noise_mode = args.snr_noise_mode
     window.snr_exclude_band_hz = float(args.exclude_band_hz)
-    window.fft_mode_combo.setCurrentIndex(1 if args.spectrum_mode == "psd" else 0)
+    spectrum_mode = "magnitude-peak" if args.spectrum_mode == "fft" else args.spectrum_mode
+    spectrum_index = next(
+        index
+        for index, (_, key) in enumerate(SPECTRUM_MODE_OPTIONS)
+        if key == spectrum_mode
+    )
+    window.fft_mode_combo.setCurrentIndex(spectrum_index)
+    window_name = {
+        "rectangular": "Rectangular",
+        "hann": "Hann",
+        "hamming": "Hamming",
+        "blackman": "Blackman",
+        "blackman-harris": "Blackman-Harris",
+        "flat-top": "Flat Top",
+    }[args.window]
+    if window_name not in FFT_WINDOW_OPTIONS:
+        raise SystemExit(f"不支持的 FFT 窗函数: {args.window}")
+    window.fft_window_combo.setCurrentText(window_name)
+    window.wavelength_nm_spin.setValue(float(args.wavelength_nm))
+    window.refractive_index_spin.setValue(float(args.refractive_index))
+    window.photoelastic_spin.setValue(float(args.photoelastic_coefficient))
+    if args.gauge_length_m is not None:
+        window.gauge_length_spin.setValue(float(args.gauge_length_m))
+    window.signal_unit_combo.setCurrentIndex(window.signal_unit_combo.findData(args.unit))
     if args.target_frequency is not None:
         window.snr_mode_combo.setCurrentIndex(1)
         window.snr_target_freq.setValue(float(args.target_frequency))
